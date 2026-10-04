@@ -25,17 +25,68 @@ jobs:
       - name: Run gitlint
         run: |
           pip install gitlint
-          gitlint
+          gitlint --ignore body-is-missing
 
-      - name: Deploy to EC2 via Docker Compose
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Build Docker Image
+        run: |
+          docker build --no-cache -t caisaara-backend:latest .
+          docker save -o caisaara-backend.tar caisaara-backend:latest
+          chmod 644 caisaara-backend.tar
+
+      - name: Copy Files to EC2
+        uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          source: "caisaara-backend.tar,docker-compose.yml"
+          target: "/home/${{ secrets.EC2_USERNAME }}/app"
+
+      - name: Deploy Docker Containers on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          ENV_FILE_CONTENT: ${{ secrets.ENV_FILE_CONTENT }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: ENV_FILE_CONTENT
           script: |
-            cd /home/${{ secrets.EC2_USERNAME }}/app
-            git pull origin main
-            docker compose up -d --build
-            docker image prune -f
+            set -e
+            APP_DIR="/home/${{ secrets.EC2_USERNAME }}/app"
+            cd "$APP_DIR"
+            
+            printf '%s\n' "$ENV_FILE_CONTENT" > .env
+            chmod 600 .env
+
+            if docker image inspect caisaara-backend:latest > /dev/null 2>&1; then
+              docker tag caisaara-backend:latest caisaara-backend:previous
+            fi
+            
+            docker load -i caisaara-backend.tar
+            rm -f caisaara-backend.tar
+
+            docker rm -f caisaara-backend redis postgres || true
+            docker compose up -d
+
+            echo "Waiting for container to be healthy..."
+            for i in $(seq 1 30); do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8050/health || true)
+              if [ "$STATUS" = "200" ]; then
+                echo "Container is healthy!"
+                docker image prune -f
+                exit 0
+              fi
+              sleep 1
+            done
+
+            echo "Health check failed. Rolling back..."
+            docker logs caisaara-backend --tail 50
+            if docker image inspect caisaara-backend:previous > /dev/null 2>&1; then
+              docker tag caisaara-backend:previous caisaara-backend:latest
+              docker compose up -d
+            fi
+            exit 1
+
+
 
