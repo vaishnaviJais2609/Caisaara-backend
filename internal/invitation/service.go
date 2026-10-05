@@ -14,7 +14,7 @@ import (
 )
 
 type UserFinder interface {
-	FindUserByID(ctx context.Context, id int64) (*model.User, error)
+	FindUserByID(id int64) (*model.User, error)
 }
 
 type InvitationService interface {
@@ -106,7 +106,7 @@ func (s *Service) GetInvite(
 }
 
 func (s *Service) FindInviteCreator(ctx context.Context, creatorID int64) (*model.User, error) {
-	user, err := s.UserFinder.FindUserByID(ctx, creatorID)
+	user, err := s.UserFinder.FindUserByID(creatorID)
 	if err != nil {
 		slog.ErrorContext(ctx, "find invite creator failed", "error", err, "creator_id", creatorID)
 		return nil, err
