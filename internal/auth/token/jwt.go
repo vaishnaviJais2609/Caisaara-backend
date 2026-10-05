@@ -1,8 +1,6 @@
 package token
 
 import (
-	"errors"
-	"os"
 	"strconv"
 	"time"
 
@@ -61,33 +59,4 @@ func GenerateGuestToken(secret string, guestID string) (string, error) {
 	)
 
 	return token.SignedString([]byte(secret))
-}
-
-func ValidateToken(tokenString string) (*AccessTokenClaims, error) {
-	secret := os.Getenv("JWT_SECRET")
-	if secret == "" {
-		return nil, errors.New("JWT_SECRET is not set")
-	}
-
-	claims := &AccessTokenClaims{}
-	jwtToken, err := jwt.ParseWithClaims(
-		tokenString,
-		claims,
-		func(t *jwt.Token) (interface{}, error) {
-			if t.Method != jwt.SigningMethodHS256 {
-				return nil, errors.New("unexpected signing method")
-			}
-			return []byte(secret), nil
-		},
-	)
-
-	if err != nil {
-		return nil, err
-	}
-
-	if !jwtToken.Valid {
-		return nil, errors.New("invalid token")
-	}
-
-	return claims, nil
 }

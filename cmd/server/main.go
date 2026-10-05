@@ -18,11 +18,8 @@ import (
 	"github.com/here-arjun-1/Caisaara-backend/internal/auth/worker"
 	"github.com/here-arjun-1/Caisaara-backend/internal/community"
 	"github.com/here-arjun-1/Caisaara-backend/internal/config"
-	"github.com/here-arjun-1/Caisaara-backend/internal/game"
-	"github.com/here-arjun-1/Caisaara-backend/internal/invitation"
 	"github.com/here-arjun-1/Caisaara-backend/internal/player"
 	"github.com/here-arjun-1/Caisaara-backend/internal/router"
-	"github.com/here-arjun-1/Caisaara-backend/internal/websocket"
 	"github.com/here-arjun-1/Caisaara-backend/migrations"
 	"github.com/hibiken/asynq"
 )
@@ -69,19 +66,7 @@ func run() error {
 	playerModule := player.NewModule(conn)
 	communityModule := community.NewModule(conn)
 
-	gameRepository := game.NewRepository(conn)
-	inviteRepo := invitation.NewRedisInviteRepository(redisClient)
-	invitationService := invitation.NewService(
-		inviteRepo,
-		gameRepository,
-		authModule.UserRepository,
-	)
-	invitationHandler := invitation.NewHandler(invitationService)
-
-	wsHub := websocket.NewHub()
-	wsHandler := websocket.NewHandler(wsHub)
-
-	r, err := router.New(cfg.JWTSecret, authModule, playerModule, communityModule, invitationHandler, wsHandler)
+	r, err := router.New(cfg.JWTSecret, authModule, playerModule, communityModule)
 	if err != nil {
 		return fmt.Errorf("setup router: %w", err)
 	}

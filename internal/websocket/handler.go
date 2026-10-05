@@ -2,13 +2,12 @@ package websocket
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
-	"github.com/here-arjun-1/Caisaara-backend/internal/auth/token"
+	"github.com/here-arjun-1/Caisaara-backend/internal/middleware"
 )
 
 type Handler struct {
@@ -38,9 +37,8 @@ func (h *Handler) Connect(c *gin.Context) {
 		return
 	}
 
-	claims, err := token.ValidateToken(accessToken)
+	claims, err := middleware.ValidateToken(accessToken)
 	if err != nil {
-		slog.Error("websocket token validation failed", "error", err)
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error": "invalid or expired token",
 		})
@@ -55,7 +53,6 @@ func (h *Handler) Connect(c *gin.Context) {
 		nil,
 	)
 	if err != nil {
-		slog.Error("websocket upgrade failed", "error", err)
 		return
 	}
 
@@ -69,12 +66,6 @@ func (h *Handler) Connect(c *gin.Context) {
 	room := h.Hub.GetOrCreateRoom(gameID)
 
 	room.AddClient(client)
-
-	slog.Info("client joined room",
-		"user_id", userID,
-		"game_id", gameID,
-		"room_count", room.Count(),
-	)
 
 	if room.Count() == 2 {
 		sendGameStart(room)
@@ -94,11 +85,6 @@ func (h *Handler) writePump(client *Client) {
 		)
 
 		if err != nil {
-			slog.Error("websocket write failed",
-				"user_id", client.UserID,
-				"game_id", client.GameID,
-				"error", err,
-			)
 			return
 		}
 	}
@@ -112,14 +98,8 @@ func (h *Handler) readPump(
 		room.RemoveClient(client.UserID)
 		client.Close()
 
-		slog.Info("client left room",
-			"user_id", client.UserID,
-			"game_id", client.GameID,
-		)
-
 		if room.Count() == 0 {
 			h.Hub.RemoveRoom(room.GameID)
-			slog.Info("room removed", "game_id", room.GameID)
 		}
 	}()
 
@@ -143,7 +123,6 @@ func sendGameStart(room *Room) {
 	data, err := json.Marshal(message)
 
 	if err != nil {
-		slog.Error("marshal game_start failed", "error", err)
 		return
 	}
 

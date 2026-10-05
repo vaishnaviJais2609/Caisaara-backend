@@ -8,20 +8,11 @@ import (
 	"github.com/here-arjun-1/Caisaara-backend/internal/auth"
 	"github.com/here-arjun-1/Caisaara-backend/internal/auth/middleware"
 	"github.com/here-arjun-1/Caisaara-backend/internal/community"
-	"github.com/here-arjun-1/Caisaara-backend/internal/invitation"
 	"github.com/here-arjun-1/Caisaara-backend/internal/player"
 	"github.com/here-arjun-1/Caisaara-backend/internal/response"
-	"github.com/here-arjun-1/Caisaara-backend/internal/websocket"
 )
 
-func New(
-	jwtSecret string,
-	authModule *auth.Module,
-	playerModule *player.Module,
-	communityModule *community.Module,
-	invitationHandler *invitation.Handler,
-	wsHandler *websocket.Handler,
-) (*gin.Engine, error) {
+func New(jwtSecret string, authModule *auth.Module, playerModule *player.Module, communityModule *community.Module) (*gin.Engine, error) {
 	r := gin.Default()
 
 	if err := r.SetTrustedProxies([]string{"127.0.0.1", "::1", "172.16.0.0/12"}); err != nil {
@@ -41,14 +32,6 @@ func New(
 	authModule.RegisterRoutes(r, protected)
 	playerModule.RegisterRoutes(r, protected)
 	communityModule.RegisterRoutes(public, protected)
-
-	if invitationHandler != nil {
-		invitation.RegisterRoutes(invitationHandler, r, protected)
-	}
-
-	if wsHandler != nil {
-		r.GET("/ws/:gameID", wsHandler.Connect)
-	}
 
 	return r, nil
 }
