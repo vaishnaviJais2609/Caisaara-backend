@@ -266,3 +266,12 @@ func (s *RegisterService) GuestLogin(ctx context.Context) (string, string, error
 
 	return guestID, guestToken, nil
 }
+
+func hashOTP(code string) string {
+	hash, _ := bcrypt.GenerateFromPassword([]byte(code), bcrypt.DefaultCost)
+	return string(hash)
+}
+
+func verifyOTP(hashedCode, rawCode string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(hashedCode), []byte(rawCode)) == nil
+}

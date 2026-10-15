@@ -2,13 +2,20 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/here-arjun-1/Caisaara-backend/internal/stockfish"
 )
 
 const enginePoolSize = 4
+
+var (
+	validFENRegex = regexp.MustCompile(`^[a-zA-Z0-9/ -]+$`)
+	ErrInvalidFEN = errors.New("invalid fen")
+)
 
 type Engine struct {
 	Pool *stockfish.Pool
@@ -25,6 +32,10 @@ func (e *Engine) BestMove(
 	fen string,
 	settings EngineSettings,
 ) (string, error) {
+	if fen == "" || !validFENRegex.MatchString(fen) || strings.ContainsAny(fen, "\r\n") {
+		return "", ErrInvalidFEN
+	}
+
 	process, err := e.Pool.GetProcess(ctx)
 	if err != nil {
 		return "", fmt.Errorf("get stockfish from pool: %w", err)
@@ -52,6 +63,10 @@ func (e *Engine) Close() {
 }
 
 func askForMove(process *stockfish.Process, fen string, settings EngineSettings) (string, error) {
+	if fen == "" || !validFENRegex.MatchString(fen) || strings.ContainsAny(fen, "\r\n") {
+		return "", ErrInvalidFEN
+	}
+
 	commands := []string{
 		"ucinewgame",
 		fmt.Sprintf("setoption name UCI_LimitStrength value %t", settings.LimitStrength),

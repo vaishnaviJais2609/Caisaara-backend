@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +16,10 @@ var (
 	ErrEngineNotFound = errors.New("stockfish engine binary not found or failed to start")
 	ErrNoBestMove     = errors.New("no valid best move returned by engine")
 	ErrTimeout        = errors.New("engine search timed out")
+	ErrInvalidInput   = errors.New("invalid engine input")
 )
+
+var validUCIInputRegex = regexp.MustCompile(`^[a-zA-Z0-9/ -]+$`)
 
 const analysisPoolSize = 2
 
@@ -28,17 +32,34 @@ type PositionOptions struct {
 	Moves []string `json:"moves,omitempty"`
 }
 
-func (p PositionOptions) BuildCommand() string {
+func (p PositionOptions) Validate() error {
+	if p.FEN != "" {
+		if !validUCIInputRegex.MatchString(p.FEN) || strings.ContainsAny(p.FEN, "\r\n") {
+			return ErrInvalidInput
+		}
+	}
+	for _, m := range p.Moves {
+		if m == "" || !validUCIInputRegex.MatchString(m) || strings.ContainsAny(m, "\r\n") {
+			return ErrInvalidInput
+		}
+	}
+	return nil
+}
+
+func (p PositionOptions) BuildCommand() (string, error) {
+	if err := p.Validate(); err != nil {
+		return "", err
+	}
 	if p.FEN != "" && len(p.Moves) > 0 {
-		return fmt.Sprintf("position fen %s moves %s", p.FEN, strings.Join(p.Moves, " "))
+		return fmt.Sprintf("position fen %s moves %s", p.FEN, strings.Join(p.Moves, " ")), nil
 	}
 	if p.FEN != "" {
-		return fmt.Sprintf("position fen %s", p.FEN)
+		return fmt.Sprintf("position fen %s", p.FEN), nil
 	}
 	if len(p.Moves) > 0 {
-		return fmt.Sprintf("position startpos moves %s", strings.Join(p.Moves, " "))
+		return fmt.Sprintf("position startpos moves %s", strings.Join(p.Moves, " ")), nil
 	}
-	return "position startpos"
+	return "position startpos", nil
 }
 
 type AnalysisOptions struct {
@@ -73,6 +94,10 @@ func NewAnalysisEngine(path string) *AnalysisEngine {
 }
 
 func (e *AnalysisEngine) Analyze(ctx context.Context, pos PositionOptions, opts AnalysisOptions) (*AnalysisResult, error) {
+	if err := pos.Validate(); err != nil {
+		return nil, err
+	}
+
 	var cancel context.CancelFunc
 	switch {
 	case opts.Timeout > 0:
@@ -161,7 +186,12 @@ func runAnalysis(process *stockfish.Process, pos PositionOptions, opts AnalysisO
 		return nil, fmt.Errorf("readyok failed: %w", err)
 	}
 
-	if err := process.Send(pos.BuildCommand()); err != nil {
+	posCmd, err := pos.BuildCommand()
+	if err != nil {
+		return nil, fmt.Errorf("build position command: %w", err)
+	}
+
+	if err := process.Send(posCmd); err != nil {
 		return nil, fmt.Errorf("send position command: %w", err)
 	}
 
