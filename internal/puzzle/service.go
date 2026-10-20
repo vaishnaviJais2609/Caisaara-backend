@@ -128,34 +128,39 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 		return nil, fmt.Errorf("get daily session: %w", err)
 	}
 
-	if session != nil && session.PuzzleID == req.PuzzleID {
-		if session.Solved {
-			return &SubmitAttemptResponse{
-				Correct:          true,
-				Solved:           true,
-				AttemptsLeft:     session.AttemptsLeft,
-				RatingChange:     0,
-				UserRatingBefore: ratingProfile.Rating,
-				UserRatingAfter:  ratingProfile.Rating,
-				CurrentStreak:    ratingProfile.CurrentStreak,
-				AttemptedMoves:   session.AttemptedMoves,
-				Message:          "Puzzle already solved for today.",
-			}, nil
-		}
+	if session == nil {
+		return nil, errors.New("daily puzzle session not found; please fetch daily puzzle first")
+	}
+	if session.PuzzleID != req.PuzzleID {
+		return nil, errors.New("puzzle id does not match daily puzzle session")
+	}
 
-		if session.AttemptsLeft <= 0 {
-			return &SubmitAttemptResponse{
-				Correct:          false,
-				Solved:           false,
-				AttemptsLeft:     0,
-				RatingChange:     0,
-				UserRatingBefore: ratingProfile.Rating,
-				UserRatingAfter:  ratingProfile.Rating,
-				CurrentStreak:    ratingProfile.CurrentStreak,
-				AttemptedMoves:   session.AttemptedMoves,
-				Message:          "No attempts remaining. You can view the solution.",
-			}, nil
-		}
+	if session.Solved {
+		return &SubmitAttemptResponse{
+			Correct:          true,
+			Solved:           true,
+			AttemptsLeft:     session.AttemptsLeft,
+			RatingChange:     0,
+			UserRatingBefore: ratingProfile.Rating,
+			UserRatingAfter:  ratingProfile.Rating,
+			CurrentStreak:    ratingProfile.CurrentStreak,
+			AttemptedMoves:   session.AttemptedMoves,
+			Message:          "Puzzle already solved for today.",
+		}, nil
+	}
+
+	if session.AttemptsLeft <= 0 {
+		return &SubmitAttemptResponse{
+			Correct:          false,
+			Solved:           false,
+			AttemptsLeft:     0,
+			RatingChange:     0,
+			UserRatingBefore: ratingProfile.Rating,
+			UserRatingAfter:  ratingProfile.Rating,
+			CurrentStreak:    ratingProfile.CurrentStreak,
+			AttemptedMoves:   session.AttemptedMoves,
+			Message:          "No attempts remaining. You can view the solution.",
+		}, nil
 	}
 
 	puzzleRecord, err := s.repo.FindPuzzleByID(ctx, req.PuzzleID)
@@ -342,6 +347,9 @@ func (s *Service) GetHint(ctx context.Context, userID int64, req HintRequest) (*
 	if err != nil {
 		return nil, fmt.Errorf("get daily session: %w", err)
 	}
+	if session == nil || session.PuzzleID != req.PuzzleID {
+		return nil, errors.New("daily puzzle session not found; please fetch daily puzzle first")
+	}
 
 	puzzleRecord, err := s.repo.FindPuzzleByID(ctx, req.PuzzleID)
 	if err != nil {
@@ -359,7 +367,7 @@ func (s *Service) GetHint(ctx context.Context, userID int64, req HintRequest) (*
 		fromSquare = correctMove[:2]
 	}
 
-	if session != nil && !session.HintUsed {
+	if !session.HintUsed {
 		session.HintUsed = true
 		_ = s.repo.UpdateDailySession(ctx, session)
 	}
@@ -379,6 +387,9 @@ func (s *Service) GetSolution(ctx context.Context, userID int64, req SolutionReq
 	if err != nil {
 		return nil, fmt.Errorf("get daily session: %w", err)
 	}
+	if session == nil || session.PuzzleID != req.PuzzleID {
+		return nil, errors.New("daily puzzle session not found; please fetch daily puzzle first")
+	}
 
 	puzzleRecord, err := s.repo.FindPuzzleByID(ctx, req.PuzzleID)
 	if err != nil {
@@ -391,10 +402,8 @@ func (s *Service) GetSolution(ctx context.Context, userID int64, req SolutionReq
 		solutionMoves = moves[1:]
 	}
 
-	if session != nil {
-		session.SolutionViewed = true
-		_ = s.repo.UpdateDailySession(ctx, session)
-	}
+	session.SolutionViewed = true
+	_ = s.repo.UpdateDailySession(ctx, session)
 
 	return &SolutionResponse{
 		Moves:          solutionMoves,
