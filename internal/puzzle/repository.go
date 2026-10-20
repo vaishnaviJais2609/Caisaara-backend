@@ -33,10 +33,26 @@ type PuzzleRepository interface {
 	GetUserRushHistory(ctx context.Context, userID int64, mode string, limit, offset int) (*RushHistoryResponse, error)
 	GetThemes(ctx context.Context) ([]PuzzleThemeInfo, error)
 	FindCustomPuzzle(ctx context.Context, filter CustomPuzzleFilter) (*Puzzle, error)
+	HasSolvedPuzzle(ctx context.Context, userID int64, puzzleID string) (bool, error)
+	Begin(ctx context.Context) (pgx.Tx, error)
+	GetDailySessionForUpdate(ctx context.Context, tx pgx.Tx, userID int64, date string) (*DailyPuzzleSession, error)
+	UpdateDailySessionTx(ctx context.Context, tx pgx.Tx, session *DailyPuzzleSession) error
+	GetOrCreateUserRatingForUpdate(ctx context.Context, tx pgx.Tx, userID int64) (*UserPuzzleRating, error)
+	UpdateUserRatingTx(ctx context.Context, tx pgx.Tx, rating *UserPuzzleRating) error
+	RecordAttemptTx(ctx context.Context, tx pgx.Tx, attempt *UserPuzzleAttempt) error
+	HasSolvedPuzzleTx(ctx context.Context, tx pgx.Tx, userID int64, puzzleID string) (bool, error)
+	GetRushSessionForUpdate(ctx context.Context, tx pgx.Tx, sessionID string) (*PuzzleRushSession, error)
+	UpdateRushSessionTx(ctx context.Context, tx pgx.Tx, session *PuzzleRushSession) error
+	GetOrCreateRushStatsForUpdate(ctx context.Context, tx pgx.Tx, userID int64) (*UserPuzzleRushStats, error)
+	UpdateRushStatsTx(ctx context.Context, tx pgx.Tx, stats *UserPuzzleRushStats) error
 }
 
 type Repository struct {
 	DB *pgxpool.Pool
+}
+
+func (r *Repository) Begin(ctx context.Context) (pgx.Tx, error) {
+	return r.DB.Begin(ctx)
 }
 
 func NewRepository(db *pgxpool.Pool) PuzzleRepository {
@@ -313,6 +329,113 @@ func (r *Repository) UpdateUserRating(ctx context.Context, rating *UserPuzzleRat
 	return err
 }
 
+func (r *Repository) GetOrCreateUserRatingForUpdate(ctx context.Context, tx pgx.Tx, userID int64) (*UserPuzzleRating, error) {
+	query := `
+		SELECT user_id, rating, rating_deviation, rating_volatility, puzzles_solved, puzzles_failed, best_rating, best_rating_at, current_streak, max_streak, last_played_date, updated_at
+		FROM user_puzzle_ratings
+		WHERE user_id = $1
+		FOR UPDATE
+	`
+
+	u := &UserPuzzleRating{}
+	var lastPlayedDate *time.Time
+
+	err := tx.QueryRow(ctx, query, userID).Scan(
+		&u.UserID,
+		&u.Rating,
+		&u.RatingDeviation,
+		&u.RatingVolatility,
+		&u.PuzzlesSolved,
+		&u.PuzzlesFailed,
+		&u.BestRating,
+		&u.BestRatingAt,
+		&u.CurrentStreak,
+		&u.MaxStreak,
+		&lastPlayedDate,
+		&u.UpdatedAt,
+	)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		insertQuery := `
+			INSERT INTO user_puzzle_ratings (
+				user_id, rating, rating_deviation, rating_volatility, puzzles_solved, puzzles_failed, best_rating, best_rating_at, current_streak, max_streak, updated_at
+			)
+			VALUES ($1, 1500, 350, 0.06, 0, 0, 1500, NOW(), 0, 0, NOW())
+			ON CONFLICT (user_id) DO UPDATE SET updated_at = NOW()
+			RETURNING user_id, rating, rating_deviation, rating_volatility, puzzles_solved, puzzles_failed, best_rating, best_rating_at, current_streak, max_streak, last_played_date, updated_at
+		`
+		err = tx.QueryRow(ctx, insertQuery, userID).Scan(
+			&u.UserID,
+			&u.Rating,
+			&u.RatingDeviation,
+			&u.RatingVolatility,
+			&u.PuzzlesSolved,
+			&u.PuzzlesFailed,
+			&u.BestRating,
+			&u.BestRatingAt,
+			&u.CurrentStreak,
+			&u.MaxStreak,
+			&lastPlayedDate,
+			&u.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+
+	if lastPlayedDate != nil {
+		u.LastPlayedDate = lastPlayedDate.Format("2006-01-02")
+	}
+
+	return u, nil
+}
+
+func (r *Repository) UpdateUserRatingTx(ctx context.Context, tx pgx.Tx, rating *UserPuzzleRating) error {
+	var lpd *time.Time
+	if rating.LastPlayedDate != "" {
+		parsed, err := time.Parse("2006-01-02", rating.LastPlayedDate)
+		if err == nil {
+			lpd = &parsed
+		}
+	}
+
+	query := `
+		UPDATE user_puzzle_ratings
+		SET rating = $1,
+			rating_deviation = $2,
+			rating_volatility = $3,
+			puzzles_solved = $4,
+			puzzles_failed = $5,
+			best_rating = $6,
+			best_rating_at = $7,
+			current_streak = $8,
+			max_streak = $9,
+			last_played_date = $10,
+			updated_at = NOW()
+		WHERE user_id = $11
+	`
+
+	_, err := tx.Exec(
+		ctx,
+		query,
+		rating.Rating,
+		rating.RatingDeviation,
+		rating.RatingVolatility,
+		rating.PuzzlesSolved,
+		rating.PuzzlesFailed,
+		rating.BestRating,
+		rating.BestRatingAt,
+		rating.CurrentStreak,
+		rating.MaxStreak,
+		lpd,
+		rating.UserID,
+	)
+
+	return err
+}
+
 func (r *Repository) RecordAttempt(ctx context.Context, attempt *UserPuzzleAttempt) error {
 	query := `
 		INSERT INTO user_puzzle_attempts (
@@ -337,6 +460,46 @@ func (r *Repository) RecordAttempt(ctx context.Context, attempt *UserPuzzleAttem
 		attempt.TimeTakenMs,
 		attempt.AttemptedMoves,
 	).Scan(&attempt.ID, &attempt.CreatedAt)
+}
+
+func (r *Repository) HasSolvedPuzzle(ctx context.Context, userID int64, puzzleID string) (bool, error) {
+	query := `SELECT EXISTS(SELECT 1 FROM user_puzzle_attempts WHERE user_id = $1 AND puzzle_id = $2 AND solved = true)`
+	var exists bool
+	err := r.DB.QueryRow(ctx, query, userID, puzzleID).Scan(&exists)
+	return exists, err
+}
+
+func (r *Repository) RecordAttemptTx(ctx context.Context, tx pgx.Tx, attempt *UserPuzzleAttempt) error {
+	query := `
+		INSERT INTO user_puzzle_attempts (
+			user_id, puzzle_id, solved, user_rating_before, user_rating_after, time_taken_ms, attempted_moves, created_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+		RETURNING id, created_at
+	`
+
+	if attempt.AttemptedMoves == nil {
+		attempt.AttemptedMoves = []string{}
+	}
+
+	return tx.QueryRow(
+		ctx,
+		query,
+		attempt.UserID,
+		attempt.PuzzleID,
+		attempt.Solved,
+		attempt.UserRatingBefore,
+		attempt.UserRatingAfter,
+		attempt.TimeTakenMs,
+		attempt.AttemptedMoves,
+	).Scan(&attempt.ID, &attempt.CreatedAt)
+}
+
+func (r *Repository) HasSolvedPuzzleTx(ctx context.Context, tx pgx.Tx, userID int64, puzzleID string) (bool, error) {
+	query := `SELECT EXISTS(SELECT 1 FROM user_puzzle_attempts WHERE user_id = $1 AND puzzle_id = $2 AND solved = true)`
+	var exists bool
+	err := tx.QueryRow(ctx, query, userID, puzzleID).Scan(&exists)
+	return exists, err
 }
 
 func (r *Repository) GetDailySession(ctx context.Context, userID int64, date string) (*DailyPuzzleSession, error) {
@@ -421,6 +584,74 @@ func (r *Repository) UpdateDailySession(ctx context.Context, session *DailyPuzzl
 	}
 
 	_, err := r.DB.Exec(
+		ctx,
+		query,
+		session.AttemptsLeft,
+		session.HintUsed,
+		session.SolutionViewed,
+		session.Solved,
+		session.RatingEarned,
+		session.AttemptedMoves,
+		session.UserID,
+		session.Date,
+	)
+
+	return err
+}
+
+func (r *Repository) GetDailySessionForUpdate(ctx context.Context, tx pgx.Tx, userID int64, date string) (*DailyPuzzleSession, error) {
+	query := `
+		SELECT user_id, puzzle_id, TO_CHAR(date, 'YYYY-MM-DD'), attempts_left, hint_used, solution_viewed, solved, rating_earned, COALESCE(attempted_moves, '{}')
+		FROM daily_puzzle_sessions
+		WHERE user_id = $1 AND date = $2::date
+		FOR UPDATE
+	`
+
+	session := &DailyPuzzleSession{}
+	err := tx.QueryRow(ctx, query, userID, date).Scan(
+		&session.UserID,
+		&session.PuzzleID,
+		&session.Date,
+		&session.AttemptsLeft,
+		&session.HintUsed,
+		&session.SolutionViewed,
+		&session.Solved,
+		&session.RatingEarned,
+		&session.AttemptedMoves,
+	)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if session.AttemptedMoves == nil {
+		session.AttemptedMoves = []string{}
+	}
+
+	return session, nil
+}
+
+func (r *Repository) UpdateDailySessionTx(ctx context.Context, tx pgx.Tx, session *DailyPuzzleSession) error {
+	query := `
+		UPDATE daily_puzzle_sessions
+		SET attempts_left = $1,
+			hint_used = $2,
+			solution_viewed = $3,
+			solved = $4,
+			rating_earned = $5,
+			attempted_moves = $6,
+			updated_at = NOW()
+		WHERE user_id = $7 AND date = $8::date
+	`
+
+	if session.AttemptedMoves == nil {
+		session.AttemptedMoves = []string{}
+	}
+
+	_, err := tx.Exec(
 		ctx,
 		query,
 		session.AttemptsLeft,
@@ -662,6 +893,97 @@ func (r *Repository) UpdateRushSession(ctx context.Context, session *PuzzleRushS
 	return err
 }
 
+func (r *Repository) GetRushSessionForUpdate(ctx context.Context, tx pgx.Tx, sessionID string) (*PuzzleRushSession, error) {
+	query := `
+		SELECT id, user_id, mode, score, strikes, current_puzzle_id, passed_puzzle_ids, status, time_limit_sec, theme, started_at, ended_at, created_at, updated_at, COALESCE(moves_history, '[]'::jsonb)
+		FROM puzzle_rush_sessions
+		WHERE id = $1::uuid
+		FOR UPDATE
+	`
+
+	session := &PuzzleRushSession{}
+	var movesData []byte
+	err := tx.QueryRow(ctx, query, sessionID).Scan(
+		&session.ID,
+		&session.UserID,
+		&session.Mode,
+		&session.Score,
+		&session.Strikes,
+		&session.CurrentPuzzleID,
+		&session.PassedPuzzleIDs,
+		&session.Status,
+		&session.TimeLimitSec,
+		&session.Theme,
+		&session.StartedAt,
+		&session.EndedAt,
+		&session.CreatedAt,
+		&session.UpdatedAt,
+		&movesData,
+	)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if session.PassedPuzzleIDs == nil {
+		session.PassedPuzzleIDs = []string{}
+	}
+
+	if len(movesData) > 0 {
+		_ = json.Unmarshal(movesData, &session.MovesHistory)
+	}
+	if session.MovesHistory == nil {
+		session.MovesHistory = []RushPuzzleAttempt{}
+	}
+
+	return session, nil
+}
+
+func (r *Repository) UpdateRushSessionTx(ctx context.Context, tx pgx.Tx, session *PuzzleRushSession) error {
+	query := `
+		UPDATE puzzle_rush_sessions
+		SET score = $1,
+			strikes = $2,
+			current_puzzle_id = $3,
+			passed_puzzle_ids = $4,
+			status = $5,
+			ended_at = $6,
+			moves_history = $7,
+			updated_at = NOW()
+		WHERE id = $8::uuid
+	`
+
+	if session.PassedPuzzleIDs == nil {
+		session.PassedPuzzleIDs = []string{}
+	}
+	if session.MovesHistory == nil {
+		session.MovesHistory = []RushPuzzleAttempt{}
+	}
+
+	movesJSON, err := json.Marshal(session.MovesHistory)
+	if err != nil {
+		movesJSON = []byte("[]")
+	}
+
+	_, err = tx.Exec(
+		ctx,
+		query,
+		session.Score,
+		session.Strikes,
+		session.CurrentPuzzleID,
+		session.PassedPuzzleIDs,
+		session.Status,
+		session.EndedAt,
+		movesJSON,
+		session.ID,
+	)
+
+	return err
+}
+
 func (r *Repository) FindRushPuzzle(ctx context.Context, minRating, maxRating int, excludedIDs []string, theme string) (*Puzzle, error) {
 	if excludedIDs == nil {
 		excludedIDs = []string{}
@@ -800,6 +1122,73 @@ func (r *Repository) UpdateRushStats(ctx context.Context, stats *UserPuzzleRushS
 	`
 
 	_, err := r.DB.Exec(
+		ctx,
+		query,
+		stats.BestScore3Min,
+		stats.BestScore5Min,
+		stats.BestScoreSurvival,
+		stats.TotalRuns,
+		stats.UserID,
+	)
+
+	return err
+}
+
+func (r *Repository) GetOrCreateRushStatsForUpdate(ctx context.Context, tx pgx.Tx, userID int64) (*UserPuzzleRushStats, error) {
+	query := `
+		SELECT user_id, best_score_3min, best_score_5min, best_score_survival, total_runs, updated_at
+		FROM user_puzzle_rush_stats
+		WHERE user_id = $1
+		FOR UPDATE
+	`
+
+	s := &UserPuzzleRushStats{}
+	err := tx.QueryRow(ctx, query, userID).Scan(
+		&s.UserID,
+		&s.BestScore3Min,
+		&s.BestScore5Min,
+		&s.BestScoreSurvival,
+		&s.TotalRuns,
+		&s.UpdatedAt,
+	)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		insertQuery := `
+			INSERT INTO user_puzzle_rush_stats (user_id, best_score_3min, best_score_5min, best_score_survival, total_runs, updated_at)
+			VALUES ($1, 0, 0, 0, 0, NOW())
+			ON CONFLICT (user_id) DO UPDATE SET updated_at = NOW()
+			RETURNING user_id, best_score_3min, best_score_5min, best_score_survival, total_runs, updated_at
+		`
+		err = tx.QueryRow(ctx, insertQuery, userID).Scan(
+			&s.UserID,
+			&s.BestScore3Min,
+			&s.BestScore5Min,
+			&s.BestScoreSurvival,
+			&s.TotalRuns,
+			&s.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
+func (r *Repository) UpdateRushStatsTx(ctx context.Context, tx pgx.Tx, stats *UserPuzzleRushStats) error {
+	query := `
+		UPDATE user_puzzle_rush_stats
+		SET best_score_3min = $1,
+			best_score_5min = $2,
+			best_score_survival = $3,
+			total_runs = $4,
+			updated_at = NOW()
+		WHERE user_id = $5
+	`
+
+	_, err := tx.Exec(
 		ctx,
 		query,
 		stats.BestScore3Min,

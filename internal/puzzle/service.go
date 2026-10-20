@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 type PuzzleService interface {
@@ -30,8 +32,50 @@ type PuzzleService interface {
 	SubmitCustomAttempt(ctx context.Context, userID int64, req SubmitCustomAttemptRequest) (*SubmitCustomAttemptResponse, error)
 }
 
+const lockStripes = 256
+
+type userLockStripes struct {
+	locks [lockStripes]sync.Mutex
+}
+
+func (l *userLockStripes) lock(userID int64) {
+	idx := uint64(userID) % lockStripes
+	l.locks[idx].Lock()
+}
+
+func (l *userLockStripes) unlock(userID int64) {
+	idx := uint64(userID) % lockStripes
+	l.locks[idx].Unlock()
+}
+
+type stringLockStripes struct {
+	locks [lockStripes]sync.Mutex
+}
+
+func (l *stringLockStripes) lock(key string) {
+	var h uint64 = 14695981039346656037
+	for i := 0; i < len(key); i++ {
+		h ^= uint64(key[i])
+		h *= 1099511628211
+	}
+	idx := h % lockStripes
+	l.locks[idx].Lock()
+}
+
+func (l *stringLockStripes) unlock(key string) {
+	var h uint64 = 14695981039346656037
+	for i := 0; i < len(key); i++ {
+		h ^= uint64(key[i])
+		h *= 1099511628211
+	}
+	idx := h % lockStripes
+	l.locks[idx].Unlock()
+}
+
 type Service struct {
-	repo PuzzleRepository
+	repo      PuzzleRepository
+	userLocks userLockStripes
+	rushLocks stringLockStripes
 }
 
 func NewService(repo PuzzleRepository) PuzzleService {
@@ -41,6 +85,9 @@ func NewService(repo PuzzleRepository) PuzzleService {
 }
 
 func (s *Service) GetDailyPuzzle(ctx context.Context, userID int64) (*DailyPuzzleResponse, error) {
+	s.userLocks.lock(userID)
+	defer s.userLocks.unlock(userID)
+
 	today := time.Now().UTC().Format("2006-01-02")
 	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
 
@@ -116,14 +163,18 @@ func (s *Service) GetDailyPuzzle(ctx context.Context, userID int64) (*DailyPuzzl
 }
 
 func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAttemptRequest) (*SubmitAttemptResponse, error) {
+	s.userLocks.lock(userID)
+	defer s.userLocks.unlock(userID)
+
 	today := time.Now().UTC().Format("2006-01-02")
 
-	ratingProfile, err := s.repo.GetOrCreateUserRating(ctx, userID)
+	tx, err := s.repo.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("get user rating: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	session, err := s.repo.GetDailySession(ctx, userID, today)
+	session, err := s.repo.GetDailySessionForUpdate(ctx, tx, userID, today)
 	if err != nil {
 		return nil, fmt.Errorf("get daily session: %w", err)
 	}
@@ -133,6 +184,11 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 	}
 	if session.PuzzleID != req.PuzzleID {
 		return nil, errors.New("puzzle id does not match daily puzzle session")
+	}
+
+	ratingProfile, err := s.repo.GetOrCreateUserRatingForUpdate(ctx, tx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get user rating: %w", err)
 	}
 
 	if session.Solved {
@@ -197,7 +253,9 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 		if session != nil {
 			session.AttemptsLeft--
 			attemptsLeft = session.AttemptsLeft
-			_ = s.repo.UpdateDailySession(ctx, session)
+			if err := s.repo.UpdateDailySessionTx(ctx, tx, session); err != nil {
+				return nil, fmt.Errorf("update daily session: %w", err)
+			}
 		}
 
 		if attemptsLeft <= 0 {
@@ -209,7 +267,9 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 			}
 			ratingProfile.PuzzlesFailed++
 
-			_ = s.repo.UpdateUserRating(ctx, ratingProfile)
+			if err := s.repo.UpdateUserRatingTx(ctx, tx, ratingProfile); err != nil {
+				return nil, fmt.Errorf("update user rating: %w", err)
+			}
 
 			attempt := &UserPuzzleAttempt{
 				UserID:           userID,
@@ -220,7 +280,13 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 				TimeTakenMs:      req.TimeTakenMs,
 				AttemptedMoves:   recordedMoves,
 			}
-			_ = s.repo.RecordAttempt(ctx, attempt)
+			if err := s.repo.RecordAttemptTx(ctx, tx, attempt); err != nil {
+				return nil, fmt.Errorf("record attempt: %w", err)
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				return nil, fmt.Errorf("commit tx: %w", err)
+			}
 
 			return &SubmitAttemptResponse{
 				Correct:          false,
@@ -233,6 +299,10 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 				AttemptedMoves:   recordedMoves,
 				Message:          "No attempts remaining. You can view the solution.",
 			}, nil
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit tx: %w", err)
 		}
 
 		return &SubmitAttemptResponse{
@@ -263,7 +333,9 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 	if session != nil && session.SolutionViewed {
 		session.Solved = true
 		session.RatingEarned = 0
-		_ = s.repo.UpdateDailySession(ctx, session)
+		if err := s.repo.UpdateDailySessionTx(ctx, tx, session); err != nil {
+			return nil, fmt.Errorf("update daily session: %w", err)
+		}
 
 		attempt := &UserPuzzleAttempt{
 			UserID:           userID,
@@ -274,7 +346,13 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 			TimeTakenMs:      req.TimeTakenMs,
 			AttemptedMoves:   recordedMoves,
 		}
-		_ = s.repo.RecordAttempt(ctx, attempt)
+		if err := s.repo.RecordAttemptTx(ctx, tx, attempt); err != nil {
+			return nil, fmt.Errorf("record attempt: %w", err)
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit tx: %w", err)
+		}
 
 		return &SubmitAttemptResponse{
 			Correct:          true,
@@ -307,12 +385,16 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 		ratingProfile.LastPlayedDate = today
 	}
 
-	_ = s.repo.UpdateUserRating(ctx, ratingProfile)
+	if err := s.repo.UpdateUserRatingTx(ctx, tx, ratingProfile); err != nil {
+		return nil, fmt.Errorf("update user rating: %w", err)
+	}
 
 	if session != nil {
 		session.Solved = true
 		session.RatingEarned = ratingChange
-		_ = s.repo.UpdateDailySession(ctx, session)
+		if err := s.repo.UpdateDailySessionTx(ctx, tx, session); err != nil {
+			return nil, fmt.Errorf("update daily session: %w", err)
+		}
 	}
 
 	attempt := &UserPuzzleAttempt{
@@ -324,7 +406,13 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 		TimeTakenMs:      req.TimeTakenMs,
 		AttemptedMoves:   recordedMoves,
 	}
-	_ = s.repo.RecordAttempt(ctx, attempt)
+	if err := s.repo.RecordAttemptTx(ctx, tx, attempt); err != nil {
+		return nil, fmt.Errorf("record attempt: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
 
 	return &SubmitAttemptResponse{
 		Correct:          true,
@@ -547,7 +635,16 @@ func (s *Service) StartRush(ctx context.Context, userID int64, req StartRushRequ
 }
 
 func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRushMoveRequest) (*SubmitRushMoveResponse, error) {
-	session, err := s.repo.GetRushSession(ctx, req.SessionID)
+	s.rushLocks.lock(req.SessionID)
+	defer s.rushLocks.unlock(req.SessionID)
+
+	tx, err := s.repo.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	session, err := s.repo.GetRushSessionForUpdate(ctx, tx, req.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("get rush session: %w", err)
 	}
@@ -574,13 +671,17 @@ func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRu
 			session.Status = "time_expired"
 			now := time.Now().UTC()
 			session.EndedAt = &now
-			if err := s.repo.UpdateRushSession(ctx, session); err != nil {
+			if err := s.repo.UpdateRushSessionTx(ctx, tx, session); err != nil {
 				return nil, fmt.Errorf("update rush session: %w", err)
 			}
 
-			summary, err := s.finalizeRushSession(ctx, session)
+			summary, err := s.finalizeRushSessionTx(ctx, tx, session)
 			if err != nil {
 				return nil, fmt.Errorf("finalize rush session: %w", err)
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				return nil, fmt.Errorf("commit tx: %w", err)
 			}
 
 			return &SubmitRushMoveResponse{
@@ -640,8 +741,12 @@ func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRu
 		}
 
 		session.CurrentPuzzleID = nextPuzzle.ID
-		if err := s.repo.UpdateRushSession(ctx, session); err != nil {
+		if err := s.repo.UpdateRushSessionTx(ctx, tx, session); err != nil {
 			return nil, fmt.Errorf("update rush session: %w", err)
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit tx: %w", err)
 		}
 
 		nextMoves := strings.Fields(nextPuzzle.Moves)
@@ -671,13 +776,17 @@ func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRu
 		session.Status = "strikes_out"
 		now := time.Now().UTC()
 		session.EndedAt = &now
-		if err := s.repo.UpdateRushSession(ctx, session); err != nil {
+		if err := s.repo.UpdateRushSessionTx(ctx, tx, session); err != nil {
 			return nil, fmt.Errorf("update rush session: %w", err)
 		}
 
-		summary, err := s.finalizeRushSession(ctx, session)
+		summary, err := s.finalizeRushSessionTx(ctx, tx, session)
 		if err != nil {
 			return nil, fmt.Errorf("finalize rush session: %w", err)
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit tx: %w", err)
 		}
 
 		return &SubmitRushMoveResponse{
@@ -698,8 +807,12 @@ func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRu
 	}
 
 	session.CurrentPuzzleID = nextPuzzle.ID
-	if err := s.repo.UpdateRushSession(ctx, session); err != nil {
+	if err := s.repo.UpdateRushSessionTx(ctx, tx, session); err != nil {
 		return nil, fmt.Errorf("update rush session: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 
 	nextMoves := strings.Fields(nextPuzzle.Moves)
@@ -725,7 +838,16 @@ func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRu
 }
 
 func (s *Service) EndRush(ctx context.Context, userID int64, req EndRushRequest) (*RushSummary, error) {
-	session, err := s.repo.GetRushSession(ctx, req.SessionID)
+	s.rushLocks.lock(req.SessionID)
+	defer s.rushLocks.unlock(req.SessionID)
+
+	tx, err := s.repo.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	session, err := s.repo.GetRushSessionForUpdate(ctx, tx, req.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("get rush session: %w", err)
 	}
@@ -772,15 +894,24 @@ func (s *Service) EndRush(ctx context.Context, userID int64, req EndRushRequest)
 	session.Status = "ended"
 	now := time.Now().UTC()
 	session.EndedAt = &now
-	if err := s.repo.UpdateRushSession(ctx, session); err != nil {
+	if err := s.repo.UpdateRushSessionTx(ctx, tx, session); err != nil {
 		return nil, fmt.Errorf("update rush session: %w", err)
 	}
 
-	return s.finalizeRushSession(ctx, session)
+	summary, err := s.finalizeRushSessionTx(ctx, tx, session)
+	if err != nil {
+		return nil, fmt.Errorf("finalize rush session: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+
+	return summary, nil
 }
 
-func (s *Service) finalizeRushSession(ctx context.Context, session *PuzzleRushSession) (*RushSummary, error) {
-	stats, err := s.repo.GetOrCreateRushStats(ctx, session.UserID)
+func (s *Service) finalizeRushSessionTx(ctx context.Context, tx pgx.Tx, session *PuzzleRushSession) (*RushSummary, error) {
+	stats, err := s.repo.GetOrCreateRushStatsForUpdate(ctx, tx, session.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("get rush stats: %w", err)
 	}
@@ -810,7 +941,7 @@ func (s *Service) finalizeRushSession(ctx context.Context, session *PuzzleRushSe
 	}
 
 	stats.TotalRuns++
-	if err := s.repo.UpdateRushStats(ctx, stats); err != nil {
+	if err := s.repo.UpdateRushStatsTx(ctx, tx, stats); err != nil {
 		return nil, fmt.Errorf("update rush stats: %w", err)
 	}
 
@@ -940,6 +1071,9 @@ func (s *Service) GetCustomPuzzle(ctx context.Context, userID int64, filter Cust
 }
 
 func (s *Service) SubmitCustomAttempt(ctx context.Context, userID int64, req SubmitCustomAttemptRequest) (*SubmitCustomAttemptResponse, error) {
+	s.userLocks.lock(userID)
+	defer s.userLocks.unlock(userID)
+
 	puzzleRecord, err := s.repo.FindPuzzleByID(ctx, req.PuzzleID)
 	if err != nil {
 		return nil, fmt.Errorf("find puzzle: %w", err)
@@ -957,7 +1091,20 @@ func (s *Service) SubmitCustomAttempt(ctx context.Context, userID int64, req Sub
 		isCorrect = strings.EqualFold(playedMove, strings.Join(moves[1:], " "))
 	}
 
-	ratingProfile, err := s.repo.GetOrCreateUserRating(ctx, userID)
+	tx, err := s.repo.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if req.Rated {
+		alreadySolved, err := s.repo.HasSolvedPuzzleTx(ctx, tx, userID, req.PuzzleID)
+		if err == nil && alreadySolved {
+			req.Rated = false
+		}
+	}
+
+	ratingProfile, err := s.repo.GetOrCreateUserRatingForUpdate(ctx, tx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("get user rating: %w", err)
 	}
@@ -980,7 +1127,9 @@ func (s *Service) SubmitCustomAttempt(ctx context.Context, userID int64, req Sub
 		} else {
 			ratingProfile.PuzzlesFailed++
 		}
-		_ = s.repo.UpdateUserRating(ctx, ratingProfile)
+		if err := s.repo.UpdateUserRatingTx(ctx, tx, ratingProfile); err != nil {
+			return nil, fmt.Errorf("update user rating: %w", err)
+		}
 	}
 
 	solutionMoves := []string{}
@@ -997,7 +1146,13 @@ func (s *Service) SubmitCustomAttempt(ctx context.Context, userID int64, req Sub
 		TimeTakenMs:      req.TimeTakenMs,
 		AttemptedMoves:   []string{playedMove},
 	}
-	_ = s.repo.RecordAttempt(ctx, attempt)
+	if err := s.repo.RecordAttemptTx(ctx, tx, attempt); err != nil {
+		return nil, fmt.Errorf("record attempt: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
 
 	return &SubmitCustomAttemptResponse{
 		Correct:          isCorrect,
