@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -98,20 +99,24 @@ func NewRepository(db *pgxpool.Pool) PuzzleRepository {
 }
 
 func (r *Repository) FindMatchingPuzzle(ctx context.Context, userID int64, minRating, maxRating int, theme string) (*Puzzle, error) {
+	offset := rand.IntN(100)
 	query := `
-		SELECT id, fen, moves, rating, rating_deviation, popularity, nb_plays, themes, COALESCE(game_url, ''), COALESCE(opening_tags, ''), created_at
-		FROM puzzles
-		WHERE rating BETWEEN $1 AND $2
-		  AND ($3 = '' OR $3 = ANY(themes))
-		  AND id NOT IN (
-		      SELECT puzzle_id FROM user_puzzle_attempts WHERE user_id = $4
-		  )
-		ORDER BY RANDOM()
-		LIMIT 1
+		WITH candidates AS (
+			SELECT id, fen, moves, rating, rating_deviation, popularity, nb_plays, themes, COALESCE(game_url, ''), COALESCE(opening_tags, ''), created_at
+			FROM puzzles
+			WHERE rating BETWEEN $1 AND $2
+			  AND ($3 = '' OR $3 = ANY(themes))
+			  AND id NOT IN (
+			      SELECT puzzle_id FROM user_puzzle_attempts WHERE user_id = $4
+			  )
+			OFFSET $5
+			LIMIT 50
+		)
+		SELECT * FROM candidates ORDER BY RANDOM() LIMIT 1
 	`
 
 	p := &Puzzle{}
-	err := r.DB.QueryRow(ctx, query, minRating, maxRating, theme, userID).Scan(
+	err := r.DB.QueryRow(ctx, query, minRating, maxRating, theme, userID, offset).Scan(
 		&p.ID,
 		&p.FEN,
 		&p.Moves,
@@ -125,13 +130,31 @@ func (r *Repository) FindMatchingPuzzle(ctx context.Context, userID int64, minRa
 		&p.CreatedAt,
 	)
 
+	if errors.Is(err, pgx.ErrNoRows) && offset > 0 {
+		err = r.DB.QueryRow(ctx, query, minRating, maxRating, theme, userID, 0).Scan(
+			&p.ID,
+			&p.FEN,
+			&p.Moves,
+			&p.Rating,
+			&p.RatingDeviation,
+			&p.Popularity,
+			&p.NbPlays,
+			&p.Themes,
+			&p.GameURL,
+			&p.OpeningTags,
+			&p.CreatedAt,
+		)
+	}
+
 	if errors.Is(err, pgx.ErrNoRows) {
 		fallbackQuery := `
-			SELECT id, fen, moves, rating, rating_deviation, popularity, nb_plays, themes, COALESCE(game_url, ''), COALESCE(opening_tags, ''), created_at
-			FROM puzzles
-			WHERE rating BETWEEN $1 AND $2
-			ORDER BY RANDOM()
-			LIMIT 1
+			WITH candidates AS (
+				SELECT id, fen, moves, rating, rating_deviation, popularity, nb_plays, themes, COALESCE(game_url, ''), COALESCE(opening_tags, ''), created_at
+				FROM puzzles
+				WHERE rating BETWEEN $1 AND $2
+				LIMIT 50
+			)
+			SELECT * FROM candidates ORDER BY RANDOM() LIMIT 1
 		`
 		err = r.DB.QueryRow(ctx, fallbackQuery, minRating-150, maxRating+150).Scan(
 			&p.ID,
@@ -644,18 +667,22 @@ func (r *Repository) FindRushPuzzle(ctx context.Context, minRating, maxRating in
 		excludedIDs = []string{}
 	}
 
+	offset := rand.IntN(100)
 	query := `
-		SELECT id, fen, moves, rating, rating_deviation, popularity, nb_plays, themes, COALESCE(game_url, ''), COALESCE(opening_tags, ''), created_at
-		FROM puzzles
-		WHERE rating BETWEEN $1 AND $2
-		  AND NOT (id = ANY($3))
-		  AND ($4 = '' OR $4 = ANY(themes))
-		ORDER BY RANDOM()
-		LIMIT 1
+		WITH candidates AS (
+			SELECT id, fen, moves, rating, rating_deviation, popularity, nb_plays, themes, COALESCE(game_url, ''), COALESCE(opening_tags, ''), created_at
+			FROM puzzles
+			WHERE rating BETWEEN $1 AND $2
+			  AND NOT (id = ANY($3))
+			  AND ($4 = '' OR $4 = ANY(themes))
+			OFFSET $5
+			LIMIT 50
+		)
+		SELECT * FROM candidates ORDER BY RANDOM() LIMIT 1
 	`
 
 	p := &Puzzle{}
-	err := r.DB.QueryRow(ctx, query, minRating, maxRating, excludedIDs, theme).Scan(
+	err := r.DB.QueryRow(ctx, query, minRating, maxRating, excludedIDs, theme, offset).Scan(
 		&p.ID,
 		&p.FEN,
 		&p.Moves,
@@ -669,14 +696,32 @@ func (r *Repository) FindRushPuzzle(ctx context.Context, minRating, maxRating in
 		&p.CreatedAt,
 	)
 
+	if errors.Is(err, pgx.ErrNoRows) && offset > 0 {
+		err = r.DB.QueryRow(ctx, query, minRating, maxRating, excludedIDs, theme, 0).Scan(
+			&p.ID,
+			&p.FEN,
+			&p.Moves,
+			&p.Rating,
+			&p.RatingDeviation,
+			&p.Popularity,
+			&p.NbPlays,
+			&p.Themes,
+			&p.GameURL,
+			&p.OpeningTags,
+			&p.CreatedAt,
+		)
+	}
+
 	if errors.Is(err, pgx.ErrNoRows) {
 		fallbackQuery := `
-			SELECT id, fen, moves, rating, rating_deviation, popularity, nb_plays, themes, COALESCE(game_url, ''), COALESCE(opening_tags, ''), created_at
-			FROM puzzles
-			WHERE rating BETWEEN $1 AND $2
-			  AND ($3 = '' OR $3 = ANY(themes))
-			ORDER BY RANDOM()
-			LIMIT 1
+			WITH candidates AS (
+				SELECT id, fen, moves, rating, rating_deviation, popularity, nb_plays, themes, COALESCE(game_url, ''), COALESCE(opening_tags, ''), created_at
+				FROM puzzles
+				WHERE rating BETWEEN $1 AND $2
+				  AND ($3 = '' OR $3 = ANY(themes))
+				LIMIT 50
+			)
+			SELECT * FROM candidates ORDER BY RANDOM() LIMIT 1
 		`
 		err = r.DB.QueryRow(ctx, fallbackQuery, minRating-150, maxRating+150, theme).Scan(
 			&p.ID,
@@ -929,16 +974,18 @@ func (r *Repository) FindCustomPuzzle(ctx context.Context, filter CustomPuzzleFi
 
 	if filter.ReviewMistakes {
 		query := `
-			SELECT p.id, p.fen, p.moves, p.rating, p.rating_deviation, p.popularity, p.nb_plays, p.themes, COALESCE(p.game_url, ''), COALESCE(p.opening_tags, ''), p.created_at
-			FROM puzzles p
-			JOIN user_puzzle_attempts a ON p.id = a.puzzle_id
-			WHERE a.user_id = $1
-			  AND a.solved = false
-			  AND ($2::INT <= 0 OR p.rating >= $2)
-			  AND ($3::INT <= 0 OR p.rating <= $3)
-			  AND ($4::TEXT[] IS NULL OR cardinality($4) = 0 OR p.themes && $4)
-			ORDER BY RANDOM()
-			LIMIT 1
+			WITH candidates AS (
+				SELECT p.id, p.fen, p.moves, p.rating, p.rating_deviation, p.popularity, p.nb_plays, p.themes, COALESCE(p.game_url, ''), COALESCE(p.opening_tags, ''), p.created_at
+				FROM puzzles p
+				JOIN user_puzzle_attempts a ON p.id = a.puzzle_id
+				WHERE a.user_id = $1
+				  AND a.solved = false
+				  AND ($2::INT <= 0 OR p.rating >= $2)
+				  AND ($3::INT <= 0 OR p.rating <= $3)
+				  AND ($4::TEXT[] IS NULL OR cardinality($4) = 0 OR p.themes && $4)
+				LIMIT 50
+			)
+			SELECT * FROM candidates ORDER BY RANDOM() LIMIT 1
 		`
 		p := &Puzzle{}
 		err := r.DB.QueryRow(ctx, query, filter.UserID, filter.MinRating, filter.MaxRating, filter.Themes).Scan(
@@ -962,23 +1009,27 @@ func (r *Repository) FindCustomPuzzle(ctx context.Context, filter CustomPuzzleFi
 		}
 	}
 
+	offset := rand.IntN(100)
 	query := `
-		SELECT id, fen, moves, rating, rating_deviation, popularity, nb_plays, themes, COALESCE(game_url, ''), COALESCE(opening_tags, ''), created_at
-		FROM puzzles
-		WHERE ($1::INT <= 0 OR rating >= $1)
-		  AND ($2::INT <= 0 OR rating <= $2)
-		  AND ($3::TEXT[] IS NULL OR cardinality($3) = 0 OR themes && $3)
-		  AND (
-		    NOT $4::BOOLEAN OR id NOT IN (
-		      SELECT puzzle_id FROM user_puzzle_attempts WHERE user_id = $5 AND solved = true
-		    )
-		  )
-		ORDER BY RANDOM()
-		LIMIT 1
+		WITH candidates AS (
+			SELECT id, fen, moves, rating, rating_deviation, popularity, nb_plays, themes, COALESCE(game_url, ''), COALESCE(opening_tags, ''), created_at
+			FROM puzzles
+			WHERE ($1::INT <= 0 OR rating >= $1)
+			  AND ($2::INT <= 0 OR rating <= $2)
+			  AND ($3::TEXT[] IS NULL OR cardinality($3) = 0 OR themes && $3)
+			  AND (
+			    NOT $4::BOOLEAN OR id NOT IN (
+			      SELECT puzzle_id FROM user_puzzle_attempts WHERE user_id = $5 AND solved = true
+			    )
+			  )
+			OFFSET $6
+			LIMIT 50
+		)
+		SELECT * FROM candidates ORDER BY RANDOM() LIMIT 1
 	`
 
 	p := &Puzzle{}
-	err := r.DB.QueryRow(ctx, query, filter.MinRating, filter.MaxRating, filter.Themes, filter.ExcludeSolved, filter.UserID).Scan(
+	err := r.DB.QueryRow(ctx, query, filter.MinRating, filter.MaxRating, filter.Themes, filter.ExcludeSolved, filter.UserID, offset).Scan(
 		&p.ID,
 		&p.FEN,
 		&p.Moves,
@@ -992,13 +1043,31 @@ func (r *Repository) FindCustomPuzzle(ctx context.Context, filter CustomPuzzleFi
 		&p.CreatedAt,
 	)
 
+	if errors.Is(err, pgx.ErrNoRows) && offset > 0 {
+		err = r.DB.QueryRow(ctx, query, filter.MinRating, filter.MaxRating, filter.Themes, filter.ExcludeSolved, filter.UserID, 0).Scan(
+			&p.ID,
+			&p.FEN,
+			&p.Moves,
+			&p.Rating,
+			&p.RatingDeviation,
+			&p.Popularity,
+			&p.NbPlays,
+			&p.Themes,
+			&p.GameURL,
+			&p.OpeningTags,
+			&p.CreatedAt,
+		)
+	}
+
 	if errors.Is(err, pgx.ErrNoRows) {
 		fallbackQuery := `
-			SELECT id, fen, moves, rating, rating_deviation, popularity, nb_plays, themes, COALESCE(game_url, ''), COALESCE(opening_tags, ''), created_at
-			FROM puzzles
-			WHERE ($1::TEXT[] IS NULL OR cardinality($1) = 0 OR themes && $1)
-			ORDER BY RANDOM()
-			LIMIT 1
+			WITH candidates AS (
+				SELECT id, fen, moves, rating, rating_deviation, popularity, nb_plays, themes, COALESCE(game_url, ''), COALESCE(opening_tags, ''), created_at
+				FROM puzzles
+				WHERE ($1::TEXT[] IS NULL OR cardinality($1) = 0 OR themes && $1)
+				LIMIT 50
+			)
+			SELECT * FROM candidates ORDER BY RANDOM() LIMIT 1
 		`
 		err = r.DB.QueryRow(ctx, fallbackQuery, filter.Themes).Scan(
 			&p.ID,
