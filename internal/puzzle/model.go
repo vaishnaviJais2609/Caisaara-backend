@@ -92,7 +92,7 @@ type SubmitAttemptResponse struct {
 }
 
 type HintRequest struct {
-	PuzzleID string `json:"puzzle_id" binding:"required"`
+	PuzzleID string `json:"puzzle_id"`
 }
 
 type HintResponse struct {
@@ -104,7 +104,7 @@ type HintResponse struct {
 }
 
 type SolutionRequest struct {
-	PuzzleID string `json:"puzzle_id" binding:"required"`
+	PuzzleID string `json:"puzzle_id"`
 }
 
 type SolutionResponse struct {

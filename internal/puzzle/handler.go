@@ -71,15 +71,17 @@ func (h *Handler) GetHint(c *gin.Context) {
 	}
 
 	var req HintRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
 	}
 
 	res, err := h.Service.GetHint(ctx, userID, req)
 	if err != nil {
 		slog.ErrorContext(ctx, "get puzzle hint failed", "user_id", userID, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get hint"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -95,15 +97,17 @@ func (h *Handler) GetSolution(c *gin.Context) {
 	}
 
 	var req SolutionRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
 	}
 
 	res, err := h.Service.GetSolution(ctx, userID, req)
 	if err != nil {
 		slog.ErrorContext(ctx, "get puzzle solution failed", "user_id", userID, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get solution"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 

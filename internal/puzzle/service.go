@@ -347,11 +347,14 @@ func (s *Service) GetHint(ctx context.Context, userID int64, req HintRequest) (*
 	if err != nil {
 		return nil, fmt.Errorf("get daily session: %w", err)
 	}
-	if session == nil || session.PuzzleID != req.PuzzleID {
+	if session == nil {
 		return nil, errors.New("daily puzzle session not found; please fetch daily puzzle first")
 	}
+	if req.PuzzleID != "" && session.PuzzleID != req.PuzzleID {
+		return nil, errors.New("unauthorized: puzzle does not match active daily puzzle session")
+	}
 
-	puzzleRecord, err := s.repo.FindPuzzleByID(ctx, req.PuzzleID)
+	puzzleRecord, err := s.repo.FindPuzzleByID(ctx, session.PuzzleID)
 	if err != nil {
 		return nil, fmt.Errorf("find puzzle: %w", err)
 	}
@@ -387,11 +390,14 @@ func (s *Service) GetSolution(ctx context.Context, userID int64, req SolutionReq
 	if err != nil {
 		return nil, fmt.Errorf("get daily session: %w", err)
 	}
-	if session == nil || session.PuzzleID != req.PuzzleID {
+	if session == nil {
 		return nil, errors.New("daily puzzle session not found; please fetch daily puzzle first")
 	}
+	if req.PuzzleID != "" && session.PuzzleID != req.PuzzleID {
+		return nil, errors.New("unauthorized: puzzle does not match active daily puzzle session")
+	}
 
-	puzzleRecord, err := s.repo.FindPuzzleByID(ctx, req.PuzzleID)
+	puzzleRecord, err := s.repo.FindPuzzleByID(ctx, session.PuzzleID)
 	if err != nil {
 		return nil, fmt.Errorf("find puzzle: %w", err)
 	}
