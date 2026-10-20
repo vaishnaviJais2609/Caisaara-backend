@@ -158,7 +158,7 @@ func run() error {
 	friendsService := friends.NewService(friendsRepository)
 	friendsHandler := friends.NewHandler(friendsService)
 
-	puzzleRepo := puzzle.NewRepository(conn)
+	puzzleRepo := puzzle.NewRepository(conn, redisClient)
 	puzzleService := puzzle.NewService(puzzleRepo)
 	puzzleHandler := puzzle.NewHandler(puzzleService)
 

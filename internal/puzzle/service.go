@@ -859,7 +859,7 @@ func (s *Service) EndRush(ctx context.Context, userID int64, req EndRushRequest)
 	}
 
 	if session.Status != "active" {
-		stats, err := s.repo.GetOrCreateRushStats(ctx, session.UserID)
+		stats, err := s.repo.GetOrCreateRushStatsForUpdate(ctx, tx, session.UserID)
 		if err != nil {
 			return nil, fmt.Errorf("get rush stats: %w", err)
 		}

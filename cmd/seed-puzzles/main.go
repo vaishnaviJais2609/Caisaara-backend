@@ -127,12 +127,11 @@ func run() error {
 	defer cancel()
 
 	var tableExists bool
-	_ = pool.QueryRow(ctx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'puzzles')").Scan(&tableExists)
+	if err := pool.QueryRow(ctx, "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'puzzles')").Scan(&tableExists); err != nil {
+		return fmt.Errorf("check puzzles table: %w", err)
+	}
 	if !tableExists {
-		_, _ = pool.Exec(ctx, "UPDATE schema_migrations SET version = 23 WHERE version >= 24")
-		if err := migrations.Run(dbURL); err != nil {
-			return fmt.Errorf("run migrations after reset: %w", err)
-		}
+		return errors.New("puzzles table does not exist")
 	}
 
 	file, err := os.Open(filepath.Clean(filePath))

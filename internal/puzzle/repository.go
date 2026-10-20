@@ -6,10 +6,12 @@ import (
 	"errors"
 	"math/rand/v2"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 type PuzzleRepository interface {
@@ -48,70 +50,26 @@ type PuzzleRepository interface {
 }
 
 type Repository struct {
-	DB *pgxpool.Pool
+	DB           *pgxpool.Pool
+	Redis        *redis.Client
+	themesCache  []PuzzleThemeInfo
+	themesExpire time.Time
+	themesMu     sync.RWMutex
 }
 
 func (r *Repository) Begin(ctx context.Context) (pgx.Tx, error) {
 	return r.DB.Begin(ctx)
 }
 
-func NewRepository(db *pgxpool.Pool) PuzzleRepository {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	queries := []string{
-		`ALTER TABLE user_puzzle_ratings ADD COLUMN IF NOT EXISTS current_streak INT NOT NULL DEFAULT 0;`,
-		`ALTER TABLE user_puzzle_ratings ADD COLUMN IF NOT EXISTS max_streak INT NOT NULL DEFAULT 0;`,
-		`ALTER TABLE user_puzzle_ratings ADD COLUMN IF NOT EXISTS last_played_date DATE;`,
-		`CREATE TABLE IF NOT EXISTS daily_puzzle_sessions (
-			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-			puzzle_id VARCHAR(16) NOT NULL REFERENCES puzzles(id) ON DELETE CASCADE,
-			date DATE NOT NULL,
-			attempts_left INT NOT NULL DEFAULT 3,
-			hint_used BOOLEAN NOT NULL DEFAULT FALSE,
-			solution_viewed BOOLEAN NOT NULL DEFAULT FALSE,
-			solved BOOLEAN NOT NULL DEFAULT FALSE,
-			rating_earned INT NOT NULL DEFAULT 0,
-			attempted_moves TEXT[] NOT NULL DEFAULT '{}',
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			PRIMARY KEY (user_id, date)
-		);`,
-		`ALTER TABLE daily_puzzle_sessions ADD COLUMN IF NOT EXISTS attempted_moves TEXT[] NOT NULL DEFAULT '{}';`,
-		`ALTER TABLE user_puzzle_attempts ADD COLUMN IF NOT EXISTS attempted_moves TEXT[] NOT NULL DEFAULT '{}';`,
-		`CREATE TABLE IF NOT EXISTS puzzle_rush_sessions (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-			mode VARCHAR(16) NOT NULL,
-			score INT NOT NULL DEFAULT 0,
-			strikes INT NOT NULL DEFAULT 0,
-			current_puzzle_id VARCHAR(16) NOT NULL REFERENCES puzzles(id) ON DELETE CASCADE,
-			passed_puzzle_ids TEXT[] NOT NULL DEFAULT '{}',
-			status VARCHAR(16) NOT NULL DEFAULT 'active',
-			time_limit_sec INT NOT NULL DEFAULT 180,
-			started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			ended_at TIMESTAMPTZ,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		);`,
-		`CREATE TABLE IF NOT EXISTS user_puzzle_rush_stats (
-			user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-			best_score_3min INT NOT NULL DEFAULT 0,
-			best_score_5min INT NOT NULL DEFAULT 0,
-			best_score_survival INT NOT NULL DEFAULT 0,
-			total_runs INT NOT NULL DEFAULT 0,
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		);`,
-		`ALTER TABLE puzzle_rush_sessions ADD COLUMN IF NOT EXISTS theme VARCHAR(32) NOT NULL DEFAULT '';`,
-		`ALTER TABLE puzzle_rush_sessions ADD COLUMN IF NOT EXISTS moves_history JSONB NOT NULL DEFAULT '[]';`,
-		`CREATE INDEX IF NOT EXISTS idx_puzzle_rush_sessions_user_time ON puzzle_rush_sessions(user_id, started_at DESC);`,
+func NewRepository(db *pgxpool.Pool, redisClient ...*redis.Client) PuzzleRepository {
+	var rClient *redis.Client
+	if len(redisClient) > 0 {
+		rClient = redisClient[0]
 	}
-
-	for _, q := range queries {
-		_, _ = db.Exec(ctx, q)
+	return &Repository{
+		DB:    db,
+		Redis: rClient,
 	}
-
-	return &Repository{DB: db}
 }
 
 func (r *Repository) FindMatchingPuzzle(ctx context.Context, userID int64, minRating, maxRating int, theme string) (*Puzzle, error) {
@@ -1325,6 +1283,34 @@ func (r *Repository) GetUserRushHistory(ctx context.Context, userID int64, mode 
 }
 
 func (r *Repository) GetThemes(ctx context.Context) ([]PuzzleThemeInfo, error) {
+	if r.Redis != nil {
+		cachedData, err := r.Redis.Get(ctx, "puzzle:themes").Bytes()
+		if err == nil && len(cachedData) > 0 {
+			var cachedThemes []PuzzleThemeInfo
+			if err := json.Unmarshal(cachedData, &cachedThemes); err == nil && len(cachedThemes) > 0 {
+				return cachedThemes, nil
+			}
+		}
+	}
+
+	r.themesMu.RLock()
+	if time.Now().Before(r.themesExpire) && len(r.themesCache) > 0 {
+		cached := make([]PuzzleThemeInfo, len(r.themesCache))
+		copy(cached, r.themesCache)
+		r.themesMu.RUnlock()
+		return cached, nil
+	}
+	r.themesMu.RUnlock()
+
+	r.themesMu.Lock()
+	defer r.themesMu.Unlock()
+
+	if time.Now().Before(r.themesExpire) && len(r.themesCache) > 0 {
+		cached := make([]PuzzleThemeInfo, len(r.themesCache))
+		copy(cached, r.themesCache)
+		return cached, nil
+	}
+
 	query := `
 		SELECT unnest(themes) AS theme, COUNT(*) AS count
 		FROM puzzles
@@ -1351,6 +1337,15 @@ func (r *Repository) GetThemes(ctx context.Context) ([]PuzzleThemeInfo, error) {
 
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	r.themesCache = themes
+	r.themesExpire = time.Now().Add(1 * time.Hour)
+
+	if r.Redis != nil {
+		if data, err := json.Marshal(themes); err == nil {
+			_ = r.Redis.Set(ctx, "puzzle:themes", data, 24*time.Hour).Err()
+		}
 	}
 
 	return themes, nil
