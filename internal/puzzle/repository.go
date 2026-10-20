@@ -2,9 +2,10 @@ package puzzle
 
 import (
 	"context"
+	crand "crypto/rand"
 	"encoding/json"
 	"errors"
-	"math/rand/v2"
+	"math/big"
 	"strings"
 	"sync"
 	"time"
@@ -72,8 +73,16 @@ func NewRepository(db *pgxpool.Pool, redisClient ...*redis.Client) PuzzleReposit
 	}
 }
 
+func secureRandomOffset(max int64) int {
+	n, err := crand.Int(crand.Reader, big.NewInt(max))
+	if err != nil {
+		return 0
+	}
+	return int(n.Int64())
+}
+
 func (r *Repository) FindMatchingPuzzle(ctx context.Context, userID int64, minRating, maxRating int, theme string) (*Puzzle, error) {
-	offset := rand.IntN(100)
+	offset := secureRandomOffset(100)
 	query := `
 		WITH candidates AS (
 			SELECT id, fen, moves, rating, rating_deviation, popularity, nb_plays, themes, COALESCE(game_url, ''), COALESCE(opening_tags, ''), created_at
@@ -947,7 +956,7 @@ func (r *Repository) FindRushPuzzle(ctx context.Context, minRating, maxRating in
 		excludedIDs = []string{}
 	}
 
-	offset := rand.IntN(100)
+	offset := secureRandomOffset(100)
 	query := `
 		WITH candidates AS (
 			SELECT id, fen, moves, rating, rating_deviation, popularity, nb_plays, themes, COALESCE(game_url, ''), COALESCE(opening_tags, ''), created_at
@@ -1393,7 +1402,7 @@ func (r *Repository) FindCustomPuzzle(ctx context.Context, filter CustomPuzzleFi
 		}
 	}
 
-	offset := rand.IntN(100)
+	offset := secureRandomOffset(100)
 	query := `
 		WITH candidates AS (
 			SELECT id, fen, moves, rating, rating_deviation, popularity, nb_plays, themes, COALESCE(game_url, ''), COALESCE(opening_tags, ''), created_at

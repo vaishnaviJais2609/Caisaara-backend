@@ -39,12 +39,12 @@ type userLockStripes struct {
 }
 
 func (l *userLockStripes) lock(userID int64) {
-	idx := uint64(userID) % lockStripes
+	idx := int(userID & (lockStripes - 1))
 	l.locks[idx].Lock()
 }
 
 func (l *userLockStripes) unlock(userID int64) {
-	idx := uint64(userID) % lockStripes
+	idx := int(userID & (lockStripes - 1))
 	l.locks[idx].Unlock()
 }
 
@@ -229,19 +229,69 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 		return nil, errors.New("invalid puzzle moves sequence")
 	}
 
-	playedMove := strings.TrimSpace(req.Move)
-	recordedMoves := []string{playedMove}
-	if session != nil {
-		session.AttemptedMoves = append(session.AttemptedMoves, playedMove)
-		recordedMoves = session.AttemptedMoves
+	currentPly := 0
+	if session != nil && len(session.AttemptedMoves) < len(moves)-1 {
+		currentPly = len(session.AttemptedMoves)
+	}
+	expectedIndex := 1 + currentPly
+	if expectedIndex >= len(moves) {
+		expectedIndex = 1
+		if session != nil {
+			session.AttemptedMoves = []string{}
+		}
 	}
 
-	correctMove := moves[1]
+	playedMove := strings.TrimSpace(req.Move)
+	correctMove := moves[expectedIndex]
 	isCorrect := strings.EqualFold(playedMove, correctMove)
+	isFullySolved := false
+	nextMove := ""
+
+	fullExpected := strings.Join(moves[1:], " ")
+	var playerMoves []string
+	for i := 1; i < len(moves); i += 2 {
+		playerMoves = append(playerMoves, moves[i])
+	}
+	playerExpected := strings.Join(playerMoves, " ")
 
 	if !isCorrect && strings.Contains(playedMove, " ") {
-		fullExpected := strings.Join(moves[1:], " ")
-		isCorrect = strings.EqualFold(playedMove, fullExpected)
+		if strings.EqualFold(playedMove, fullExpected) || strings.EqualFold(playedMove, playerExpected) {
+			isCorrect = true
+			isFullySolved = true
+			nextMove = ""
+			if session != nil {
+				session.AttemptedMoves = moves[1:]
+			}
+		} else if expectedIndex > 1 {
+			remainingExpected := strings.Join(moves[expectedIndex:], " ")
+			if strings.EqualFold(playedMove, remainingExpected) {
+				isCorrect = true
+				isFullySolved = true
+				nextMove = ""
+				if session != nil {
+					session.AttemptedMoves = moves[1:]
+				}
+			}
+		}
+	} else if isCorrect {
+		if expectedIndex+1 < len(moves) {
+			nextMove = moves[expectedIndex+1]
+			isFullySolved = false
+			if session != nil {
+				session.AttemptedMoves = append(session.AttemptedMoves, playedMove, nextMove)
+			}
+		} else {
+			isFullySolved = true
+			nextMove = ""
+			if session != nil {
+				session.AttemptedMoves = append(session.AttemptedMoves, playedMove)
+			}
+		}
+	}
+
+	recordedMoves := []string{playedMove}
+	if session != nil {
+		recordedMoves = session.AttemptedMoves
 	}
 
 	attemptsLeft := 3
@@ -253,6 +303,8 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 		if session != nil {
 			session.AttemptsLeft--
 			attemptsLeft = session.AttemptsLeft
+			session.AttemptedMoves = []string{}
+			recordedMoves = []string{playedMove}
 			if err := s.repo.UpdateDailySessionTx(ctx, tx, session); err != nil {
 				return nil, fmt.Errorf("update daily session: %w", err)
 			}
@@ -318,13 +370,27 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 		}, nil
 	}
 
-	nextMove := ""
-	isFullySolved := true
-	if len(moves) > 2 && !strings.Contains(playedMove, " ") {
-		nextMove = moves[2]
-		if len(moves) > 3 {
-			isFullySolved = true
+	if !isFullySolved {
+		if err := s.repo.UpdateDailySessionTx(ctx, tx, session); err != nil {
+			return nil, fmt.Errorf("update daily session: %w", err)
 		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit tx: %w", err)
+		}
+
+		return &SubmitAttemptResponse{
+			Correct:          true,
+			Solved:           false,
+			NextMove:         nextMove,
+			AttemptsLeft:     attemptsLeft,
+			RatingChange:     0,
+			UserRatingBefore: ratingProfile.Rating,
+			UserRatingAfter:  ratingProfile.Rating,
+			CurrentStreak:    ratingProfile.CurrentStreak,
+			AttemptedMoves:   recordedMoves,
+			Message:          "Correct move! Keep going...",
+		}, nil
 	}
 
 	ratingChange := 0
@@ -357,7 +423,7 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 		return &SubmitAttemptResponse{
 			Correct:          true,
 			Solved:           true,
-			NextMove:         nextMove,
+			NextMove:         "",
 			AttemptsLeft:     attemptsLeft,
 			RatingChange:     0,
 			UserRatingBefore: beforeRating,
@@ -416,8 +482,8 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 
 	return &SubmitAttemptResponse{
 		Correct:          true,
-		Solved:           isFullySolved,
-		NextMove:         nextMove,
+		Solved:           true,
+		NextMove:         "",
 		AttemptsLeft:     attemptsLeft,
 		RatingChange:     ratingChange,
 		UserRatingBefore: beforeRating,
