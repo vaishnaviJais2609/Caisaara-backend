@@ -169,6 +169,9 @@ func (h *Handler) GetUserHistory(c *gin.Context) {
 	if err != nil || offset < 0 {
 		offset = 0
 	}
+	if offset > 5000 {
+		offset = 5000
+	}
 
 	res, err := h.Service.GetUserHistory(ctx, userID, limit, offset)
 	if err != nil {
@@ -305,6 +308,9 @@ func (h *Handler) GetUserRushHistory(c *gin.Context) {
 	offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
 	if err != nil || offset < 0 {
 		offset = 0
+	}
+	if offset > 5000 {
+		offset = 5000
 	}
 
 	res, err := h.Service.GetUserRushHistory(ctx, userID, mode, limit, offset)

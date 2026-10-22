@@ -5,6 +5,7 @@ import (
 	crand "crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/singleflight"
 )
 
 type PuzzleRepository interface {
@@ -24,6 +26,9 @@ type PuzzleRepository interface {
 	GetDailySession(ctx context.Context, userID int64, date string) (*DailyPuzzleSession, error)
 	CreateDailySession(ctx context.Context, session *DailyPuzzleSession) error
 	UpdateDailySession(ctx context.Context, session *DailyPuzzleSession) error
+	SetDailyHintUsed(ctx context.Context, userID int64, date string) error
+	SetDailySolutionViewed(ctx context.Context, userID int64, date string) error
+	CloseActiveRushSessionsForUser(ctx context.Context, userID int64) error
 	GetUserStats(ctx context.Context, userID int64) (*PuzzleStatsResponse, error)
 	GetUserHistory(ctx context.Context, userID int64, limit, offset int) (*PuzzleHistoryResponse, error)
 	CreateRushSession(ctx context.Context, session *PuzzleRushSession) error
@@ -56,6 +61,7 @@ type Repository struct {
 	themesCache  []PuzzleThemeInfo
 	themesExpire time.Time
 	themesMu     sync.RWMutex
+	themesGroup  singleflight.Group
 }
 
 func (r *Repository) Begin(ctx context.Context) (pgx.Tx, error) {
@@ -566,6 +572,26 @@ func (r *Repository) UpdateDailySession(ctx context.Context, session *DailyPuzzl
 	return err
 }
 
+func (r *Repository) SetDailyHintUsed(ctx context.Context, userID int64, date string) error {
+	query := `
+		UPDATE daily_puzzle_sessions
+		SET hint_used = true, updated_at = NOW()
+		WHERE user_id = $1 AND date = $2::date
+	`
+	_, err := r.DB.Exec(ctx, query, userID, date)
+	return err
+}
+
+func (r *Repository) SetDailySolutionViewed(ctx context.Context, userID int64, date string) error {
+	query := `
+		UPDATE daily_puzzle_sessions
+		SET solution_viewed = true, updated_at = NOW()
+		WHERE user_id = $1 AND date = $2::date
+	`
+	_, err := r.DB.Exec(ctx, query, userID, date)
+	return err
+}
+
 func (r *Repository) GetDailySessionForUpdate(ctx context.Context, tx pgx.Tx, userID int64, date string) (*DailyPuzzleSession, error) {
 	query := `
 		SELECT user_id, puzzle_id, TO_CHAR(date, 'YYYY-MM-DD'), attempts_left, hint_used, solution_viewed, solved, rating_earned, COALESCE(attempted_moves, '{}')
@@ -661,6 +687,16 @@ func (r *Repository) GetUserStats(ctx context.Context, userID int64) (*PuzzleSta
 }
 
 func (r *Repository) GetUserHistory(ctx context.Context, userID int64, limit, offset int) (*PuzzleHistoryResponse, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > 5000 {
+		offset = 5000
+	}
+
 	var total int64
 	countQuery := `SELECT COUNT(*) FROM user_puzzle_attempts WHERE user_id = $1`
 	if err := r.DB.QueryRow(ctx, countQuery, userID).Scan(&total); err != nil {
@@ -951,6 +987,16 @@ func (r *Repository) UpdateRushSessionTx(ctx context.Context, tx pgx.Tx, session
 	return err
 }
 
+func (r *Repository) CloseActiveRushSessionsForUser(ctx context.Context, userID int64) error {
+	query := `
+		UPDATE puzzle_rush_sessions
+		SET status = 'abandoned', ended_at = NOW(), updated_at = NOW()
+		WHERE user_id = $1 AND status = 'active'
+	`
+	_, err := r.DB.Exec(ctx, query, userID)
+	return err
+}
+
 func (r *Repository) FindRushPuzzle(ctx context.Context, minRating, maxRating int, excludedIDs []string, theme string) (*Puzzle, error) {
 	if excludedIDs == nil {
 		excludedIDs = []string{}
@@ -1173,15 +1219,26 @@ func (r *Repository) GetRushLeaderboard(ctx context.Context, mode string, limit 
 		limit = 50
 	}
 
-	query := `
-		SELECT s.user_id, u.username, MAX(s.score) AS high_score, s.mode, MAX(s.started_at) AS played_at
-		FROM puzzle_rush_sessions s
+	var col string
+	switch mode {
+	case "3min":
+		col = "best_score_3min"
+	case "5min":
+		col = "best_score_5min"
+	case "survival":
+		col = "best_score_survival"
+	default:
+		return []RushLeaderboardEntry{}, nil
+	}
+
+	query := fmt.Sprintf(`
+		SELECT s.user_id, u.username, s.%s AS high_score, $1 AS mode, s.updated_at AS played_at
+		FROM user_puzzle_rush_stats s
 		JOIN users u ON s.user_id = u.id
-		WHERE s.mode = $1 AND s.score > 0
-		GROUP BY s.user_id, u.username, s.mode
-		ORDER BY high_score DESC
+		WHERE s.%s > 0
+		ORDER BY s.%s DESC
 		LIMIT $2
-	`
+	`, col, col, col)
 
 	rows, err := r.DB.Query(ctx, query, mode, limit)
 	if err != nil {
@@ -1217,6 +1274,9 @@ func (r *Repository) GetUserRushHistory(ctx context.Context, userID int64, mode 
 	}
 	if offset < 0 {
 		offset = 0
+	}
+	if offset > 5000 {
+		offset = 5000
 	}
 
 	countQuery := `
@@ -1311,50 +1371,64 @@ func (r *Repository) GetThemes(ctx context.Context) ([]PuzzleThemeInfo, error) {
 	}
 	r.themesMu.RUnlock()
 
-	r.themesMu.Lock()
-	defer r.themesMu.Unlock()
+	val, err, _ := r.themesGroup.Do("getThemes", func() (any, error) {
+		r.themesMu.RLock()
+		if time.Now().Before(r.themesExpire) && len(r.themesCache) > 0 {
+			cached := make([]PuzzleThemeInfo, len(r.themesCache))
+			copy(cached, r.themesCache)
+			r.themesMu.RUnlock()
+			return cached, nil
+		}
+		r.themesMu.RUnlock()
 
-	if time.Now().Before(r.themesExpire) && len(r.themesCache) > 0 {
-		cached := make([]PuzzleThemeInfo, len(r.themesCache))
-		copy(cached, r.themesCache)
-		return cached, nil
-	}
+		query := `
+			SELECT unnest(themes) AS theme, COUNT(*) AS count
+			FROM puzzles
+			GROUP BY theme
+			HAVING COUNT(*) >= 50
+			ORDER BY count DESC
+		`
 
-	query := `
-		SELECT unnest(themes) AS theme, COUNT(*) AS count
-		FROM puzzles
-		GROUP BY theme
-		HAVING COUNT(*) >= 50
-		ORDER BY count DESC
-	`
+		rows, err := r.DB.Query(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
 
-	rows, err := r.DB.Query(ctx, query)
+		themes := make([]PuzzleThemeInfo, 0)
+		for rows.Next() {
+			var t PuzzleThemeInfo
+			if err := rows.Scan(&t.ID, &t.Count); err != nil {
+				return nil, err
+			}
+			t.Name = formatThemeName(t.ID)
+			themes = append(themes, t)
+		}
+
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+
+		r.themesMu.Lock()
+		r.themesCache = themes
+		r.themesExpire = time.Now().Add(1 * time.Hour)
+		r.themesMu.Unlock()
+
+		if r.Redis != nil {
+			if data, err := json.Marshal(themes); err == nil {
+				_ = r.Redis.Set(ctx, "puzzle:themes", data, 24*time.Hour).Err()
+			}
+		}
+
+		return themes, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	themes := make([]PuzzleThemeInfo, 0)
-	for rows.Next() {
-		var t PuzzleThemeInfo
-		if err := rows.Scan(&t.ID, &t.Count); err != nil {
-			return nil, err
-		}
-		t.Name = formatThemeName(t.ID)
-		themes = append(themes, t)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	r.themesCache = themes
-	r.themesExpire = time.Now().Add(1 * time.Hour)
-
-	if r.Redis != nil {
-		if data, err := json.Marshal(themes); err == nil {
-			_ = r.Redis.Set(ctx, "puzzle:themes", data, 24*time.Hour).Err()
-		}
+	themes, ok := val.([]PuzzleThemeInfo)
+	if !ok {
+		return nil, errors.New("failed to cast themes cache")
 	}
 
 	return themes, nil

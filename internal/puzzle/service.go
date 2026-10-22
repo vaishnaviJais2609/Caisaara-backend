@@ -303,8 +303,8 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 		if session != nil {
 			session.AttemptsLeft--
 			attemptsLeft = session.AttemptsLeft
-			session.AttemptedMoves = []string{}
-			recordedMoves = []string{playedMove}
+			recordedMoves = append([]string{}, session.AttemptedMoves...)
+			recordedMoves = append(recordedMoves, playedMove)
 			if err := s.repo.UpdateDailySessionTx(ctx, tx, session); err != nil {
 				return nil, fmt.Errorf("update daily session: %w", err)
 			}
@@ -443,6 +443,11 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 	}
 	ratingProfile.PuzzlesSolved++
 
+	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+	if ratingProfile.LastPlayedDate != "" && ratingProfile.LastPlayedDate != today && ratingProfile.LastPlayedDate != yesterday {
+		ratingProfile.CurrentStreak = 0
+	}
+
 	if ratingProfile.LastPlayedDate != today {
 		ratingProfile.CurrentStreak++
 		if ratingProfile.CurrentStreak > ratingProfile.MaxStreak {
@@ -495,6 +500,9 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 }
 
 func (s *Service) GetHint(ctx context.Context, userID int64, req HintRequest) (*HintResponse, error) {
+	s.userLocks.lock(userID)
+	defer s.userLocks.unlock(userID)
+
 	today := time.Now().UTC().Format("2006-01-02")
 
 	session, err := s.repo.GetDailySession(ctx, userID, today)
@@ -518,15 +526,19 @@ func (s *Service) GetHint(ctx context.Context, userID int64, req HintRequest) (*
 		return nil, errors.New("invalid puzzle moves sequence")
 	}
 
-	correctMove := moves[1]
+	expectedIndex := 1 + len(session.AttemptedMoves)
+	if expectedIndex >= len(moves) {
+		expectedIndex = 1
+	}
+
+	correctMove := moves[expectedIndex]
 	fromSquare := ""
 	if len(correctMove) >= 2 {
 		fromSquare = correctMove[:2]
 	}
 
 	if !session.HintUsed {
-		session.HintUsed = true
-		_ = s.repo.UpdateDailySession(ctx, session)
+		_ = s.repo.SetDailyHintUsed(ctx, userID, today)
 	}
 
 	return &HintResponse{
@@ -538,6 +550,9 @@ func (s *Service) GetHint(ctx context.Context, userID int64, req HintRequest) (*
 }
 
 func (s *Service) GetSolution(ctx context.Context, userID int64, req SolutionRequest) (*SolutionResponse, error) {
+	s.userLocks.lock(userID)
+	defer s.userLocks.unlock(userID)
+
 	today := time.Now().UTC().Format("2006-01-02")
 
 	session, err := s.repo.GetDailySession(ctx, userID, today)
@@ -562,8 +577,7 @@ func (s *Service) GetSolution(ctx context.Context, userID int64, req SolutionReq
 		solutionMoves = moves[1:]
 	}
 
-	session.SolutionViewed = true
-	_ = s.repo.UpdateDailySession(ctx, session)
+	_ = s.repo.SetDailySolutionViewed(ctx, userID, today)
 
 	return &SolutionResponse{
 		Moves:          solutionMoves,
@@ -636,6 +650,13 @@ func calculateRatingChange(playerRating, puzzleRating int, solved bool, attempts
 }
 
 func (s *Service) StartRush(ctx context.Context, userID int64, req StartRushRequest) (*StartRushResponse, error) {
+	s.userLocks.lock(userID)
+	defer s.userLocks.unlock(userID)
+
+	if err := s.repo.CloseActiveRushSessionsForUser(ctx, userID); err != nil {
+		return nil, fmt.Errorf("close active rush sessions: %w", err)
+	}
+
 	var timeLimitSec int
 	switch req.Mode {
 	case "3min":
@@ -777,10 +798,17 @@ func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRu
 	}
 
 	playedMove := strings.TrimSpace(req.Move)
-	correctMove := moves[1]
-	isCorrect := strings.EqualFold(playedMove, correctMove)
-	if !isCorrect && strings.Contains(playedMove, " ") {
-		isCorrect = strings.EqualFold(playedMove, strings.Join(moves[1:], " "))
+	var isCorrect bool
+	if len(moves) == 2 {
+		isCorrect = strings.EqualFold(playedMove, moves[1])
+	} else {
+		fullExpected := strings.Join(moves[1:], " ")
+		var playerMoves []string
+		for i := 1; i < len(moves); i += 2 {
+			playerMoves = append(playerMoves, moves[i])
+		}
+		playerExpected := strings.Join(playerMoves, " ")
+		isCorrect = strings.EqualFold(playedMove, fullExpected) || strings.EqualFold(playedMove, playerExpected)
 	}
 
 	solutionMoves := []string{}
@@ -1151,10 +1179,17 @@ func (s *Service) SubmitCustomAttempt(ctx context.Context, userID int64, req Sub
 	}
 
 	playedMove := strings.TrimSpace(req.Move)
-	correctMove := moves[1]
-	isCorrect := strings.EqualFold(playedMove, correctMove)
-	if !isCorrect && strings.Contains(playedMove, " ") {
-		isCorrect = strings.EqualFold(playedMove, strings.Join(moves[1:], " "))
+	var isCorrect bool
+	if len(moves) == 2 {
+		isCorrect = strings.EqualFold(playedMove, moves[1])
+	} else {
+		fullExpected := strings.Join(moves[1:], " ")
+		var playerMoves []string
+		for i := 1; i < len(moves); i += 2 {
+			playerMoves = append(playerMoves, moves[i])
+		}
+		playerExpected := strings.Join(playerMoves, " ")
+		isCorrect = strings.EqualFold(playedMove, fullExpected) || strings.EqualFold(playedMove, playerExpected)
 	}
 
 	tx, err := s.repo.Begin(ctx)

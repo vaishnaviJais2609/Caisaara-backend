@@ -2,6 +2,7 @@ package puzzle
 
 import (
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"sync"
 	"time"
@@ -9,7 +10,14 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type ipRateLimiter struct {
+const numLimiterShards = 32
+
+type shardedRateLimiter struct {
+	shards [numLimiterShards]*limiterShard
+	stop   chan struct{}
+}
+
+type limiterShard struct {
 	mu      sync.Mutex
 	clients map[string]*clientBucket
 }
@@ -19,14 +27,42 @@ type clientBucket struct {
 	lastRefill time.Time
 }
 
-func (l *ipRateLimiter) allow(key string, limit float64, window time.Duration) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+func newShardedRateLimiter() *shardedRateLimiter {
+	l := &shardedRateLimiter{
+		stop: make(chan struct{}),
+	}
+	for i := 0; i < numLimiterShards; i++ {
+		l.shards[i] = &limiterShard{
+			clients: make(map[string]*clientBucket),
+		}
+	}
+	go l.cleanup()
+	return l
+}
+
+func (l *shardedRateLimiter) getShard(key string) *limiterShard {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	idx := h.Sum32() % numLimiterShards
+	return l.shards[idx]
+}
+
+func (l *shardedRateLimiter) allow(key string, limit float64, window time.Duration) bool {
+	shard := l.getShard(key)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
 	now := time.Now()
-	b, ok := l.clients[key]
+	b, ok := shard.clients[key]
 	if !ok {
-		l.clients[key] = &clientBucket{
+		if len(shard.clients) > 2000 {
+			for k, v := range shard.clients {
+				if now.Sub(v.lastRefill) > 5*time.Minute {
+					delete(shard.clients, k)
+				}
+			}
+		}
+		shard.clients[key] = &clientBucket{
 			tokens:     limit - 1,
 			lastRefill: now,
 		}
@@ -47,10 +83,31 @@ func (l *ipRateLimiter) allow(key string, limit float64, window time.Duration) b
 	return true
 }
 
-func rateLimitMiddleware(limit float64, window time.Duration) gin.HandlerFunc {
-	limiter := &ipRateLimiter{
-		clients: make(map[string]*clientBucket),
+func (l *shardedRateLimiter) cleanup() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-l.stop:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			for i := 0; i < numLimiterShards; i++ {
+				shard := l.shards[i]
+				shard.mu.Lock()
+				for k, v := range shard.clients {
+					if now.Sub(v.lastRefill) > 10*time.Minute {
+						delete(shard.clients, k)
+					}
+				}
+				shard.mu.Unlock()
+			}
+		}
 	}
+}
+
+func rateLimitMiddleware(limit float64, window time.Duration) gin.HandlerFunc {
+	limiter := newShardedRateLimiter()
 	return func(c *gin.Context) {
 		key := c.ClientIP()
 		if userID, exists := c.Get("userID"); exists {
