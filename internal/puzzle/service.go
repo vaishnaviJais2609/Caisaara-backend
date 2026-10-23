@@ -13,14 +13,30 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+var (
+	ErrInvalidUCIMove        = errors.New("invalid UCI move")
+	ErrInvalidMode           = errors.New("invalid mode")
+	ErrInvalidRatingRange    = errors.New("invalid rating range")
+	ErrPuzzleNotFound        = errors.New("puzzle not found")
+	ErrNoMatchingPuzzle      = errors.New("no puzzle matches the filters")
+	ErrRushSessionNotFound   = errors.New("rush session not found")
+	ErrPuzzleAlreadySolved   = errors.New("puzzle already solved today")
+	ErrPuzzleAlreadyFailed   = errors.New("no attempts remaining")
+	ErrHintAlreadyUsed       = errors.New("hint already used")
+	ErrRushSessionEnded      = errors.New("rush session already ended")
+	ErrPuzzleSessionMismatch = errors.New("puzzle id does not match session")
+	ErrPuzzleNotFinished     = errors.New("puzzle has not been completed by user yet")
+)
+
 type PuzzleService interface {
-	GetDailyPuzzle(ctx context.Context, userID int64) (*DailyPuzzleResponse, error)
-	SubmitAttempt(ctx context.Context, userID int64, req SubmitAttemptRequest) (*SubmitAttemptResponse, error)
-	GetHint(ctx context.Context, userID int64, req HintRequest) (*HintResponse, error)
-	GetSolution(ctx context.Context, userID int64, req SolutionRequest) (*SolutionResponse, error)
-	GetNextPuzzle(ctx context.Context, userID int64, theme string) (*Puzzle, error)
+	GetDailyPuzzle(ctx context.Context, userID int64, tz ...string) (*DailyPuzzleResponse, error)
+	SubmitAttempt(ctx context.Context, userID int64, req SubmitAttemptRequest, tz ...string) (*SubmitAttemptResponse, error)
+	GetHint(ctx context.Context, userID int64, req HintRequest, tz ...string) (*HintResponse, error)
+	GetSolution(ctx context.Context, userID int64, req SolutionRequest, tz ...string) (*SolutionResponse, error)
+	GetNextPuzzle(ctx context.Context, userID int64, theme string) (*NextPuzzleResponse, error)
 	GetUserStats(ctx context.Context, userID int64) (*PuzzleStatsResponse, error)
 	GetUserHistory(ctx context.Context, userID int64, limit, offset int) (*PuzzleHistoryResponse, error)
+	GetPuzzleByID(ctx context.Context, userID int64, puzzleID string) (*PuzzleDetailsResponse, error)
 	StartRush(ctx context.Context, userID int64, req StartRushRequest) (*StartRushResponse, error)
 	SubmitRushMove(ctx context.Context, userID int64, req SubmitRushMoveRequest) (*SubmitRushMoveResponse, error)
 	EndRush(ctx context.Context, userID int64, req EndRushRequest) (*RushSummary, error)
@@ -84,12 +100,64 @@ func NewService(repo PuzzleRepository) PuzzleService {
 	}
 }
 
-func (s *Service) GetDailyPuzzle(ctx context.Context, userID int64) (*DailyPuzzleResponse, error) {
+func isValidUCIMove(m string) bool {
+	m = strings.TrimSpace(m)
+	if strings.Contains(m, " ") {
+		parts := strings.Fields(m)
+		if len(parts) == 0 {
+			return false
+		}
+		for _, p := range parts {
+			if !isValidSingleUCIMove(p) {
+				return false
+			}
+		}
+		return true
+	}
+	return isValidSingleUCIMove(m)
+}
+
+func isValidSingleUCIMove(m string) bool {
+	if len(m) != 4 && len(m) != 5 {
+		return false
+	}
+	if m[0] < 'a' || m[0] > 'h' || m[1] < '1' || m[1] > '8' {
+		return false
+	}
+	if m[2] < 'a' || m[2] > 'h' || m[3] < '1' || m[3] > '8' {
+		return false
+	}
+	if len(m) == 5 {
+		p := strings.ToLower(string(m[4]))
+		if p != "q" && p != "r" && p != "b" && p != "n" {
+			return false
+		}
+	}
+	return true
+}
+
+func getTodayAndYesterday(tz string) (string, string) {
+	loc := time.UTC
+	if tz != "" {
+		if l, err := time.LoadLocation(tz); err == nil {
+			loc = l
+		}
+	}
+	now := time.Now().In(loc)
+	today := now.Format("2006-01-02")
+	yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
+	return today, yesterday
+}
+
+func (s *Service) GetDailyPuzzle(ctx context.Context, userID int64, tz ...string) (*DailyPuzzleResponse, error) {
 	s.userLocks.lock(userID)
 	defer s.userLocks.unlock(userID)
 
-	today := time.Now().UTC().Format("2006-01-02")
-	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+	timeZone := ""
+	if len(tz) > 0 {
+		timeZone = tz[0]
+	}
+	today, yesterday := getTodayAndYesterday(timeZone)
 
 	ratingProfile, err := s.repo.GetOrCreateUserRating(ctx, userID)
 	if err != nil {
@@ -142,31 +210,50 @@ func (s *Service) GetDailyPuzzle(ctx context.Context, userID int64) (*DailyPuzzl
 
 	moves := strings.Fields(puzzleRecord.Moves)
 	initialMove := ""
+	totalMoves := 0
+	playerMovesCount := 0
 	if len(moves) > 0 {
 		initialMove = moves[0]
+		if len(moves) > 1 {
+			totalMoves = len(moves) - 1
+			playerMovesCount = len(moves) / 2
+		}
 	}
 
 	return &DailyPuzzleResponse{
-		PuzzleID:       puzzleRecord.ID,
-		FEN:            puzzleRecord.FEN,
-		InitialMove:    initialMove,
-		Rating:         puzzleRecord.Rating,
-		Themes:         puzzleRecord.Themes,
-		AttemptsLeft:   session.AttemptsLeft,
-		HintAvailable:  !session.HintUsed,
-		SolutionViewed: session.SolutionViewed,
-		Solved:         session.Solved,
-		CurrentStreak:  ratingProfile.CurrentStreak,
-		PlayerRating:   ratingProfile.Rating,
-		AttemptedMoves: session.AttemptedMoves,
+		PuzzleID:         puzzleRecord.ID,
+		FEN:              puzzleRecord.FEN,
+		InitialMove:      initialMove,
+		Rating:           puzzleRecord.Rating,
+		Themes:           puzzleRecord.Themes,
+		AttemptsLeft:     session.AttemptsLeft,
+		HintAvailable:    !session.HintUsed,
+		SolutionViewed:   session.SolutionViewed,
+		Solved:           session.Solved,
+		CurrentStreak:    ratingProfile.CurrentStreak,
+		PlayerRating:     ratingProfile.Rating,
+		AttemptedMoves:   session.AttemptedMoves,
+		TotalMoves:       totalMoves,
+		PlayerMovesCount: playerMovesCount,
 	}, nil
 }
 
-func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAttemptRequest) (*SubmitAttemptResponse, error) {
+func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAttemptRequest, tz ...string) (*SubmitAttemptResponse, error) {
 	s.userLocks.lock(userID)
 	defer s.userLocks.unlock(userID)
 
-	today := time.Now().UTC().Format("2006-01-02")
+	req.Move = strings.TrimSpace(req.Move)
+	req.PuzzleID = strings.TrimSpace(req.PuzzleID)
+
+	if !isValidUCIMove(req.Move) {
+		return nil, ErrInvalidUCIMove
+	}
+
+	timeZone := ""
+	if len(tz) > 0 {
+		timeZone = tz[0]
+	}
+	today, _ := getTodayAndYesterday(timeZone)
 
 	tx, err := s.repo.Begin(ctx)
 	if err != nil {
@@ -180,10 +267,10 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 	}
 
 	if session == nil {
-		return nil, errors.New("daily puzzle session not found; please fetch daily puzzle first")
+		return nil, ErrPuzzleNotFound
 	}
 	if session.PuzzleID != req.PuzzleID {
-		return nil, errors.New("puzzle id does not match daily puzzle session")
+		return nil, ErrPuzzleSessionMismatch
 	}
 
 	ratingProfile, err := s.repo.GetOrCreateUserRatingForUpdate(ctx, tx, userID)
@@ -192,31 +279,11 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 	}
 
 	if session.Solved {
-		return &SubmitAttemptResponse{
-			Correct:          true,
-			Solved:           true,
-			AttemptsLeft:     session.AttemptsLeft,
-			RatingChange:     0,
-			UserRatingBefore: ratingProfile.Rating,
-			UserRatingAfter:  ratingProfile.Rating,
-			CurrentStreak:    ratingProfile.CurrentStreak,
-			AttemptedMoves:   session.AttemptedMoves,
-			Message:          "Puzzle already solved for today.",
-		}, nil
+		return nil, ErrPuzzleAlreadySolved
 	}
 
 	if session.AttemptsLeft <= 0 {
-		return &SubmitAttemptResponse{
-			Correct:          false,
-			Solved:           false,
-			AttemptsLeft:     0,
-			RatingChange:     0,
-			UserRatingBefore: ratingProfile.Rating,
-			UserRatingAfter:  ratingProfile.Rating,
-			CurrentStreak:    ratingProfile.CurrentStreak,
-			AttemptedMoves:   session.AttemptedMoves,
-			Message:          "No attempts remaining. You can view the solution.",
-		}, nil
+		return nil, ErrPuzzleAlreadyFailed
 	}
 
 	puzzleRecord, err := s.repo.FindPuzzleByID(ctx, req.PuzzleID)
@@ -318,6 +385,8 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 				ratingProfile.Rating = 100
 			}
 			ratingProfile.PuzzlesFailed++
+			ratingProfile.CurrentStreak = 0
+			ratingProfile.LastPlayedDate = today
 
 			if err := s.repo.UpdateUserRatingTx(ctx, tx, ratingProfile); err != nil {
 				return nil, fmt.Errorf("update user rating: %w", err)
@@ -499,21 +568,30 @@ func (s *Service) SubmitAttempt(ctx context.Context, userID int64, req SubmitAtt
 	}, nil
 }
 
-func (s *Service) GetHint(ctx context.Context, userID int64, req HintRequest) (*HintResponse, error) {
+func (s *Service) GetHint(ctx context.Context, userID int64, req HintRequest, tz ...string) (*HintResponse, error) {
 	s.userLocks.lock(userID)
 	defer s.userLocks.unlock(userID)
 
-	today := time.Now().UTC().Format("2006-01-02")
+	req.PuzzleID = strings.TrimSpace(req.PuzzleID)
+
+	timeZone := ""
+	if len(tz) > 0 {
+		timeZone = tz[0]
+	}
+	today, _ := getTodayAndYesterday(timeZone)
 
 	session, err := s.repo.GetDailySession(ctx, userID, today)
 	if err != nil {
 		return nil, fmt.Errorf("get daily session: %w", err)
 	}
 	if session == nil {
-		return nil, errors.New("daily puzzle session not found; please fetch daily puzzle first")
+		return nil, ErrPuzzleNotFound
 	}
 	if req.PuzzleID != "" && session.PuzzleID != req.PuzzleID {
-		return nil, errors.New("unauthorized: puzzle does not match active daily puzzle session")
+		return nil, ErrPuzzleSessionMismatch
+	}
+	if session.HintUsed {
+		return nil, ErrHintAlreadyUsed
 	}
 
 	puzzleRecord, err := s.repo.FindPuzzleByID(ctx, session.PuzzleID)
@@ -549,21 +627,27 @@ func (s *Service) GetHint(ctx context.Context, userID int64, req HintRequest) (*
 	}, nil
 }
 
-func (s *Service) GetSolution(ctx context.Context, userID int64, req SolutionRequest) (*SolutionResponse, error) {
+func (s *Service) GetSolution(ctx context.Context, userID int64, req SolutionRequest, tz ...string) (*SolutionResponse, error) {
 	s.userLocks.lock(userID)
 	defer s.userLocks.unlock(userID)
 
-	today := time.Now().UTC().Format("2006-01-02")
+	req.PuzzleID = strings.TrimSpace(req.PuzzleID)
+
+	timeZone := ""
+	if len(tz) > 0 {
+		timeZone = tz[0]
+	}
+	today, _ := getTodayAndYesterday(timeZone)
 
 	session, err := s.repo.GetDailySession(ctx, userID, today)
 	if err != nil {
 		return nil, fmt.Errorf("get daily session: %w", err)
 	}
 	if session == nil {
-		return nil, errors.New("daily puzzle session not found; please fetch daily puzzle first")
+		return nil, ErrPuzzleNotFound
 	}
 	if req.PuzzleID != "" && session.PuzzleID != req.PuzzleID {
-		return nil, errors.New("unauthorized: puzzle does not match active daily puzzle session")
+		return nil, ErrPuzzleSessionMismatch
 	}
 
 	puzzleRecord, err := s.repo.FindPuzzleByID(ctx, session.PuzzleID)
@@ -587,7 +671,7 @@ func (s *Service) GetSolution(ctx context.Context, userID int64, req SolutionReq
 	}, nil
 }
 
-func (s *Service) GetNextPuzzle(ctx context.Context, userID int64, theme string) (*Puzzle, error) {
+func (s *Service) GetNextPuzzle(ctx context.Context, userID int64, theme string) (*NextPuzzleResponse, error) {
 	ratingProfile, err := s.repo.GetOrCreateUserRating(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("get user rating: %w", err)
@@ -596,7 +680,77 @@ func (s *Service) GetNextPuzzle(ctx context.Context, userID int64, theme string)
 	minRating := ratingProfile.Rating - 75
 	maxRating := ratingProfile.Rating + 75
 
-	return s.repo.FindMatchingPuzzle(ctx, userID, minRating, maxRating, theme)
+	p, err := s.repo.FindMatchingPuzzle(ctx, userID, minRating, maxRating, theme)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNoMatchingPuzzle
+		}
+		return nil, fmt.Errorf("find matching puzzle: %w", err)
+	}
+
+	moves := strings.Fields(p.Moves)
+	initialMove := ""
+	totalMoves := 0
+	playerMovesCount := 0
+	if len(moves) > 0 {
+		initialMove = moves[0]
+		if len(moves) > 1 {
+			totalMoves = len(moves) - 1
+			playerMovesCount = len(moves) / 2
+		}
+	}
+
+	return &NextPuzzleResponse{
+		PuzzleID:         p.ID,
+		FEN:              p.FEN,
+		InitialMove:      initialMove,
+		Rating:           p.Rating,
+		Themes:           p.Themes,
+		TotalMoves:       totalMoves,
+		PlayerMovesCount: playerMovesCount,
+	}, nil
+}
+
+func (s *Service) GetPuzzleByID(ctx context.Context, userID int64, puzzleID string) (*PuzzleDetailsResponse, error) {
+	puzzleID = strings.TrimSpace(puzzleID)
+	if puzzleID == "" {
+		return nil, ErrPuzzleNotFound
+	}
+
+	finished, err := s.repo.HasUserFinishedPuzzle(ctx, userID, puzzleID)
+	if err != nil {
+		return nil, fmt.Errorf("check puzzle finished: %w", err)
+	}
+	if !finished {
+		return nil, ErrPuzzleNotFinished
+	}
+
+	p, err := s.repo.FindPuzzleByID(ctx, puzzleID)
+	if errors.Is(err, pgx.ErrNoRows) || p == nil {
+		return nil, ErrPuzzleNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find puzzle by id: %w", err)
+	}
+
+	moves := strings.Fields(p.Moves)
+	initialMove := ""
+	solutionMoves := []string{}
+	if len(moves) > 0 {
+		initialMove = moves[0]
+		if len(moves) > 1 {
+			solutionMoves = moves[1:]
+		}
+	}
+
+	return &PuzzleDetailsResponse{
+		PuzzleID:      p.ID,
+		FEN:           p.FEN,
+		InitialMove:   initialMove,
+		Rating:        p.Rating,
+		Themes:        p.Themes,
+		SolutionMoves: solutionMoves,
+	}, nil
 }
 
 func (s *Service) GetUserStats(ctx context.Context, userID int64) (*PuzzleStatsResponse, error) {
@@ -666,7 +820,7 @@ func (s *Service) StartRush(ctx context.Context, userID int64, req StartRushRequ
 	case "survival":
 		timeLimitSec = 0
 	default:
-		return nil, errors.New("invalid mode: must be 3min, 5min, or survival")
+		return nil, ErrInvalidMode
 	}
 
 	minRating, maxRating := getRushRatingWindow(0)
@@ -699,8 +853,14 @@ func (s *Service) StartRush(ctx context.Context, userID int64, req StartRushRequ
 
 	moves := strings.Fields(puzzle.Moves)
 	initialMove := ""
+	totalMoves := 0
+	playerMovesCount := 0
 	if len(moves) > 0 {
 		initialMove = moves[0]
+		if len(moves) > 1 {
+			totalMoves = len(moves) - 1
+			playerMovesCount = len(moves) / 2
+		}
 	}
 
 	return &StartRushResponse{
@@ -712,16 +872,25 @@ func (s *Service) StartRush(ctx context.Context, userID int64, req StartRushRequ
 		Strikes:      session.Strikes,
 		StrikesLeft:  3,
 		Puzzle: RushPuzzleData{
-			PuzzleID:    puzzle.ID,
-			FEN:         puzzle.FEN,
-			InitialMove: initialMove,
-			Rating:      puzzle.Rating,
-			Themes:      puzzle.Themes,
+			PuzzleID:         puzzle.ID,
+			FEN:              puzzle.FEN,
+			InitialMove:      initialMove,
+			Rating:           puzzle.Rating,
+			Themes:           puzzle.Themes,
+			TotalMoves:       totalMoves,
+			PlayerMovesCount: playerMovesCount,
 		},
 	}, nil
 }
 
 func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRushMoveRequest) (*SubmitRushMoveResponse, error) {
+	req.Move = strings.TrimSpace(req.Move)
+	req.PuzzleID = strings.TrimSpace(req.PuzzleID)
+
+	if !isValidUCIMove(req.Move) {
+		return nil, ErrInvalidUCIMove
+	}
+
 	s.rushLocks.lock(req.SessionID)
 	defer s.rushLocks.unlock(req.SessionID)
 
@@ -736,20 +905,14 @@ func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRu
 		return nil, fmt.Errorf("get rush session: %w", err)
 	}
 	if session == nil {
-		return nil, errors.New("rush session not found")
+		return nil, ErrRushSessionNotFound
 	}
 	if session.UserID != userID {
-		return nil, errors.New("unauthorized session access")
+		return nil, ErrRushSessionNotFound
 	}
 
 	if session.Status != "active" {
-		return &SubmitRushMoveResponse{
-			Score:       session.Score,
-			Strikes:     session.Strikes,
-			StrikesLeft: 0,
-			GameOver:    true,
-			Reason:      session.Status,
-		}, nil
+		return nil, ErrRushSessionEnded
 	}
 
 	if session.TimeLimitSec > 0 {
@@ -784,12 +947,12 @@ func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRu
 	}
 
 	if session.CurrentPuzzleID != req.PuzzleID {
-		return nil, errors.New("puzzle id does not match current session puzzle")
+		return nil, ErrPuzzleSessionMismatch
 	}
 
 	puzzleRecord, err := s.repo.FindPuzzleByID(ctx, req.PuzzleID)
-	if err != nil {
-		return nil, fmt.Errorf("find puzzle: %w", err)
+	if err != nil || puzzleRecord == nil {
+		return nil, ErrPuzzleNotFound
 	}
 
 	moves := strings.Fields(puzzleRecord.Moves)
@@ -799,16 +962,79 @@ func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRu
 
 	playedMove := strings.TrimSpace(req.Move)
 	var isCorrect bool
-	if len(moves) == 2 {
-		isCorrect = strings.EqualFold(playedMove, moves[1])
-	} else {
-		fullExpected := strings.Join(moves[1:], " ")
-		var playerMoves []string
-		for i := 1; i < len(moves); i += 2 {
-			playerMoves = append(playerMoves, moves[i])
+	var nextOpponentMove string
+	var puzzleSolved bool
+
+	var currentAttemptIndex int = -1
+	for i := len(session.MovesHistory) - 1; i >= 0; i-- {
+		if session.MovesHistory[i].PuzzleID == puzzleRecord.ID && !session.MovesHistory[i].Solved {
+			currentAttemptIndex = i
+			break
 		}
-		playerExpected := strings.Join(playerMoves, " ")
-		isCorrect = strings.EqualFold(playedMove, fullExpected) || strings.EqualFold(playedMove, playerExpected)
+	}
+
+	fullExpected := strings.Join(moves[1:], " ")
+	var playerMoves []string
+	for i := 1; i < len(moves); i += 2 {
+		playerMoves = append(playerMoves, moves[i])
+	}
+	playerExpected := strings.Join(playerMoves, " ")
+
+	if strings.EqualFold(playedMove, fullExpected) || strings.EqualFold(playedMove, playerExpected) {
+		isCorrect = true
+		puzzleSolved = true
+	} else if currentAttemptIndex != -1 {
+		lastAttempt := &session.MovesHistory[currentAttemptIndex]
+		expectedIdx := len(lastAttempt.AttemptedMoves) + 1
+		if expectedIdx < len(moves) && strings.EqualFold(playedMove, moves[expectedIdx]) {
+			isCorrect = true
+			if expectedIdx+2 < len(moves) {
+				nextOpponentMove = moves[expectedIdx+1]
+				lastAttempt.AttemptedMoves = append(lastAttempt.AttemptedMoves, playedMove, nextOpponentMove)
+				puzzleSolved = false
+			} else {
+				puzzleSolved = true
+				lastAttempt.Solved = true
+				lastAttempt.AttemptedMoves = append(lastAttempt.AttemptedMoves, playedMove)
+				lastAttempt.SolutionMoves = moves[1:]
+			}
+		}
+	} else {
+		if strings.EqualFold(playedMove, moves[1]) {
+			isCorrect = true
+			if len(moves) > 2 {
+				nextOpponentMove = moves[2]
+				session.MovesHistory = append(session.MovesHistory, RushPuzzleAttempt{
+					PuzzleID:       puzzleRecord.ID,
+					Solved:         false,
+					AttemptedMoves: []string{playedMove, nextOpponentMove},
+					SolutionMoves:  moves[1:],
+					Rating:         puzzleRecord.Rating,
+				})
+				puzzleSolved = false
+			} else {
+				puzzleSolved = true
+			}
+		}
+	}
+
+	if isCorrect && !puzzleSolved {
+		if err := s.repo.UpdateRushSessionTx(ctx, tx, session); err != nil {
+			return nil, fmt.Errorf("update rush session: %w", err)
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit tx: %w", err)
+		}
+
+		return &SubmitRushMoveResponse{
+			Correct:     true,
+			NextMove:    nextOpponentMove,
+			Score:       session.Score,
+			Strikes:     session.Strikes,
+			StrikesLeft: 3 - session.Strikes,
+			GameOver:    false,
+		}, nil
 	}
 
 	solutionMoves := []string{}
@@ -816,18 +1042,20 @@ func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRu
 		solutionMoves = moves[1:]
 	}
 
-	session.MovesHistory = append(session.MovesHistory, RushPuzzleAttempt{
-		PuzzleID:       puzzleRecord.ID,
-		Solved:         isCorrect,
-		AttemptedMoves: []string{playedMove},
-		SolutionMoves:  solutionMoves,
-		Rating:         puzzleRecord.Rating,
-	})
-
-	session.PassedPuzzleIDs = append(session.PassedPuzzleIDs, session.CurrentPuzzleID)
-
 	if isCorrect {
+		if currentAttemptIndex == -1 {
+			session.MovesHistory = append(session.MovesHistory, RushPuzzleAttempt{
+				PuzzleID:       puzzleRecord.ID,
+				Solved:         true,
+				AttemptedMoves: []string{playedMove},
+				SolutionMoves:  solutionMoves,
+				Rating:         puzzleRecord.Rating,
+			})
+		}
+
+		session.PassedPuzzleIDs = append(session.PassedPuzzleIDs, session.CurrentPuzzleID)
 		session.Score++
+
 		minRating, maxRating := getRushRatingWindow(session.Score)
 		nextPuzzle, err := s.repo.FindRushPuzzle(ctx, minRating, maxRating, session.PassedPuzzleIDs, session.Theme)
 		if err != nil {
@@ -845,8 +1073,14 @@ func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRu
 
 		nextMoves := strings.Fields(nextPuzzle.Moves)
 		initialMove := ""
+		nextTotalMoves := 0
+		nextPlayerMovesCount := 0
 		if len(nextMoves) > 0 {
 			initialMove = nextMoves[0]
+			if len(nextMoves) > 1 {
+				nextTotalMoves = len(nextMoves) - 1
+				nextPlayerMovesCount = len(nextMoves) / 2
+			}
 		}
 
 		return &SubmitRushMoveResponse{
@@ -856,16 +1090,33 @@ func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRu
 			StrikesLeft: 3 - session.Strikes,
 			GameOver:    false,
 			NextPuzzle: &RushPuzzleData{
-				PuzzleID:    nextPuzzle.ID,
-				FEN:         nextPuzzle.FEN,
-				InitialMove: initialMove,
-				Rating:      nextPuzzle.Rating,
-				Themes:      nextPuzzle.Themes,
+				PuzzleID:         nextPuzzle.ID,
+				FEN:              nextPuzzle.FEN,
+				InitialMove:      initialMove,
+				Rating:           nextPuzzle.Rating,
+				Themes:           nextPuzzle.Themes,
+				TotalMoves:       nextTotalMoves,
+				PlayerMovesCount: nextPlayerMovesCount,
 			},
 		}, nil
 	}
 
+	if currentAttemptIndex != -1 {
+		session.MovesHistory[currentAttemptIndex].Solved = false
+		session.MovesHistory[currentAttemptIndex].AttemptedMoves = append(session.MovesHistory[currentAttemptIndex].AttemptedMoves, playedMove)
+	} else {
+		session.MovesHistory = append(session.MovesHistory, RushPuzzleAttempt{
+			PuzzleID:       puzzleRecord.ID,
+			Solved:         false,
+			AttemptedMoves: []string{playedMove},
+			SolutionMoves:  solutionMoves,
+			Rating:         puzzleRecord.Rating,
+		})
+	}
+
+	session.PassedPuzzleIDs = append(session.PassedPuzzleIDs, session.CurrentPuzzleID)
 	session.Strikes++
+
 	if session.Strikes >= 3 {
 		session.Status = "strikes_out"
 		now := time.Now().UTC()
@@ -911,8 +1162,14 @@ func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRu
 
 	nextMoves := strings.Fields(nextPuzzle.Moves)
 	initialMove := ""
+	nextTotalMoves := 0
+	nextPlayerMovesCount := 0
 	if len(nextMoves) > 0 {
 		initialMove = nextMoves[0]
+		if len(nextMoves) > 1 {
+			nextTotalMoves = len(nextMoves) - 1
+			nextPlayerMovesCount = len(nextMoves) / 2
+		}
 	}
 
 	return &SubmitRushMoveResponse{
@@ -922,11 +1179,13 @@ func (s *Service) SubmitRushMove(ctx context.Context, userID int64, req SubmitRu
 		StrikesLeft: 3 - session.Strikes,
 		GameOver:    false,
 		NextPuzzle: &RushPuzzleData{
-			PuzzleID:    nextPuzzle.ID,
-			FEN:         nextPuzzle.FEN,
-			InitialMove: initialMove,
-			Rating:      nextPuzzle.Rating,
-			Themes:      nextPuzzle.Themes,
+			PuzzleID:         nextPuzzle.ID,
+			FEN:              nextPuzzle.FEN,
+			InitialMove:      initialMove,
+			Rating:           nextPuzzle.Rating,
+			Themes:           nextPuzzle.Themes,
+			TotalMoves:       nextTotalMoves,
+			PlayerMovesCount: nextPlayerMovesCount,
 		},
 	}, nil
 }
@@ -946,43 +1205,14 @@ func (s *Service) EndRush(ctx context.Context, userID int64, req EndRushRequest)
 		return nil, fmt.Errorf("get rush session: %w", err)
 	}
 	if session == nil {
-		return nil, errors.New("rush session not found")
+		return nil, ErrRushSessionNotFound
 	}
 	if session.UserID != userID {
-		return nil, errors.New("unauthorized session access")
+		return nil, ErrRushSessionNotFound
 	}
 
 	if session.Status != "active" {
-		stats, err := s.repo.GetOrCreateRushStatsForUpdate(ctx, tx, session.UserID)
-		if err != nil {
-			return nil, fmt.Errorf("get rush stats: %w", err)
-		}
-		bestScore := 0
-		switch session.Mode {
-		case "3min":
-			bestScore = stats.BestScore3Min
-		case "5min":
-			bestScore = stats.BestScore5Min
-		case "survival":
-			bestScore = stats.BestScoreSurvival
-		}
-		ended := time.Now().UTC()
-		if session.EndedAt != nil {
-			ended = *session.EndedAt
-		}
-		durationSec := int(ended.Sub(session.StartedAt).Seconds())
-		if durationSec < 0 {
-			durationSec = 0
-		}
-		return &RushSummary{
-			SessionID:      session.ID,
-			Mode:           session.Mode,
-			FinalScore:     session.Score,
-			TotalStrikes:   session.Strikes,
-			IsNewHighScore: false,
-			BestScore:      bestScore,
-			DurationSec:    durationSec,
-		}, nil
+		return nil, ErrRushSessionEnded
 	}
 
 	session.Status = "ended"
@@ -1135,6 +1365,10 @@ func (s *Service) GetThemes(ctx context.Context) (*ThemesResponse, error) {
 }
 
 func (s *Service) GetCustomPuzzle(ctx context.Context, userID int64, filter CustomPuzzleFilter) (*CustomPuzzleResponse, error) {
+	if filter.MinRating > 0 && filter.MaxRating > 0 && filter.MinRating > filter.MaxRating {
+		return nil, ErrInvalidRatingRange
+	}
+
 	if filter.MinRating <= 0 && filter.MaxRating <= 0 {
 		ratingProfile, err := s.repo.GetOrCreateUserRating(ctx, userID)
 		if err == nil && ratingProfile != nil {
@@ -1151,26 +1385,41 @@ func (s *Service) GetCustomPuzzle(ctx context.Context, userID int64, filter Cust
 
 	moves := strings.Fields(puzzle.Moves)
 	initialMove := ""
+	totalMoves := 0
+	playerMovesCount := 0
 	if len(moves) > 0 {
 		initialMove = moves[0]
+		if len(moves) > 1 {
+			totalMoves = len(moves) - 1
+			playerMovesCount = len(moves) / 2
+		}
 	}
 
 	return &CustomPuzzleResponse{
-		PuzzleID:    puzzle.ID,
-		FEN:         puzzle.FEN,
-		InitialMove: initialMove,
-		Rating:      puzzle.Rating,
-		Themes:      puzzle.Themes,
+		PuzzleID:         puzzle.ID,
+		FEN:              puzzle.FEN,
+		InitialMove:      initialMove,
+		Rating:           puzzle.Rating,
+		Themes:           puzzle.Themes,
+		TotalMoves:       totalMoves,
+		PlayerMovesCount: playerMovesCount,
 	}, nil
 }
 
 func (s *Service) SubmitCustomAttempt(ctx context.Context, userID int64, req SubmitCustomAttemptRequest) (*SubmitCustomAttemptResponse, error) {
+	req.Move = strings.TrimSpace(req.Move)
+	req.PuzzleID = strings.TrimSpace(req.PuzzleID)
+
+	if !isValidUCIMove(req.Move) {
+		return nil, ErrInvalidUCIMove
+	}
+
 	s.userLocks.lock(userID)
 	defer s.userLocks.unlock(userID)
 
 	puzzleRecord, err := s.repo.FindPuzzleByID(ctx, req.PuzzleID)
-	if err != nil {
-		return nil, fmt.Errorf("find puzzle: %w", err)
+	if err != nil || puzzleRecord == nil {
+		return nil, ErrPuzzleNotFound
 	}
 
 	moves := strings.Fields(puzzleRecord.Moves)

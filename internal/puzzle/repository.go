@@ -53,6 +53,7 @@ type PuzzleRepository interface {
 	UpdateRushSessionTx(ctx context.Context, tx pgx.Tx, session *PuzzleRushSession) error
 	GetOrCreateRushStatsForUpdate(ctx context.Context, tx pgx.Tx, userID int64) (*UserPuzzleRushStats, error)
 	UpdateRushStatsTx(ctx context.Context, tx pgx.Tx, stats *UserPuzzleRushStats) error
+	HasUserFinishedPuzzle(ctx context.Context, userID int64, puzzleID string) (bool, error)
 }
 
 type Repository struct {
@@ -706,7 +707,7 @@ func (r *Repository) GetUserHistory(ctx context.Context, userID int64, limit, of
 	query := `
 		SELECT a.id, a.puzzle_id, a.solved, COALESCE(a.attempted_moves, '{}'), COALESCE(p.moves, ''),
 		       a.user_rating_before, a.user_rating_after, (a.user_rating_after - a.user_rating_before) AS rating_change,
-		       a.time_taken_ms, a.created_at
+		       a.time_taken_ms, a.created_at, COALESCE(p.fen, ''), COALESCE(p.themes, '{}')
 		FROM user_puzzle_attempts a
 		LEFT JOIN puzzles p ON a.puzzle_id = p.id
 		WHERE a.user_id = $1
@@ -724,6 +725,8 @@ func (r *Repository) GetUserHistory(ctx context.Context, userID int64, limit, of
 	for rows.Next() {
 		var item PuzzleHistoryItem
 		var rawMoves string
+		var fen string
+		var themes []string
 		if err := rows.Scan(
 			&item.ID,
 			&item.PuzzleID,
@@ -735,21 +738,28 @@ func (r *Repository) GetUserHistory(ctx context.Context, userID int64, limit, of
 			&item.RatingChange,
 			&item.TimeTakenMs,
 			&item.CreatedAt,
+			&fen,
+			&themes,
 		); err != nil {
 			return nil, err
 		}
+
+		item.FEN = fen
+		item.Themes = themes
 
 		if item.AttemptedMoves == nil {
 			item.AttemptedMoves = []string{}
 		}
 
 		parts := strings.Fields(rawMoves)
-		switch {
-		case len(parts) > 1:
-			item.SolutionMoves = parts[1:]
-		case len(parts) == 1:
-			item.SolutionMoves = parts
-		default:
+		if len(parts) > 0 {
+			item.InitialMove = parts[0]
+			if len(parts) > 1 {
+				item.SolutionMoves = parts[1:]
+			} else {
+				item.SolutionMoves = []string{}
+			}
+		} else {
 			item.SolutionMoves = []string{}
 		}
 
@@ -1071,6 +1081,21 @@ func (r *Repository) FindRushPuzzle(ctx context.Context, minRating, maxRating in
 			&p.OpeningTags,
 			&p.CreatedAt,
 		)
+		if errors.Is(err, pgx.ErrNoRows) && theme != "" {
+			err = r.DB.QueryRow(ctx, fallbackQuery, minRating-200, maxRating+200, "").Scan(
+				&p.ID,
+				&p.FEN,
+				&p.Moves,
+				&p.Rating,
+				&p.RatingDeviation,
+				&p.Popularity,
+				&p.NbPlays,
+				&p.Themes,
+				&p.GameURL,
+				&p.OpeningTags,
+				&p.CreatedAt,
+			)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1232,9 +1257,10 @@ func (r *Repository) GetRushLeaderboard(ctx context.Context, mode string, limit 
 	}
 
 	query := fmt.Sprintf(`
-		SELECT s.user_id, u.username, s.%s AS high_score, $1 AS mode, s.updated_at AS played_at
+		SELECT s.user_id, COALESCE(NULLIF(p.display_name, ''), u.username) AS username, s.%s AS high_score, $1 AS mode, s.updated_at AS played_at
 		FROM user_puzzle_rush_stats s
 		JOIN users u ON s.user_id = u.id
+		LEFT JOIN player_profiles p ON p.user_id = u.id
 		WHERE s.%s > 0
 		ORDER BY s.%s DESC
 		LIMIT $2
@@ -1618,4 +1644,25 @@ func formatThemeName(theme string) string {
 		return name
 	}
 	return theme
+}
+
+func (r *Repository) HasUserFinishedPuzzle(ctx context.Context, userID int64, puzzleID string) (bool, error) {
+	var count int
+	err := r.DB.QueryRow(ctx, `
+		SELECT COUNT(*) FROM user_puzzle_attempts
+		WHERE user_id = $1 AND puzzle_id = $2
+	`, userID, puzzleID).Scan(&count)
+	if err == nil && count > 0 {
+		return true, nil
+	}
+
+	err = r.DB.QueryRow(ctx, `
+		SELECT COUNT(*) FROM daily_puzzle_sessions
+		WHERE user_id = $1 AND puzzle_id = $2 AND (solved = true OR attempts_left <= 0 OR solution_viewed = true)
+	`, userID, puzzleID).Scan(&count)
+	if err == nil && count > 0 {
+		return true, nil
+	}
+
+	return false, nil
 }

@@ -115,7 +115,9 @@ func rateLimitMiddleware(limit float64, window time.Duration) gin.HandlerFunc {
 		}
 		if !limiter.allow(key, limit, window) {
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-				"error": "rate limit exceeded, please slow down",
+				"success": false,
+				"error":   "rate_limit_exceeded",
+				"message": "rate limit exceeded, please slow down",
 			})
 			return
 		}
@@ -133,6 +135,7 @@ func RegisterRoutes(handler *Handler, r *gin.Engine, authMiddleware gin.HandlerF
 		puzzles.POST("/daily/hint", handler.GetHint)
 		puzzles.POST("/daily/solution", handler.GetSolution)
 		puzzles.GET("/next", handler.GetNextPuzzle)
+		puzzles.POST("/next/attempt", handler.SubmitNextAttempt)
 		puzzles.GET("/stats", handler.GetUserStats)
 		puzzles.GET("/history", handler.GetUserHistory)
 
@@ -149,5 +152,7 @@ func RegisterRoutes(handler *Handler, r *gin.Engine, authMiddleware gin.HandlerF
 			rush.GET("/stats", handler.GetUserRushStats)
 			rush.GET("/history", handler.GetUserRushHistory)
 		}
+
+		puzzles.GET("/:puzzle_id", handler.GetPuzzleByID)
 	}
 }

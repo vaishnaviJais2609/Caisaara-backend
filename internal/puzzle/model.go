@@ -58,18 +58,20 @@ type DailyPuzzleSession struct {
 }
 
 type DailyPuzzleResponse struct {
-	PuzzleID       string   `json:"puzzle_id"`
-	FEN            string   `json:"fen"`
-	InitialMove    string   `json:"initial_move"`
-	Rating         int      `json:"rating"`
-	Themes         []string `json:"themes"`
-	AttemptsLeft   int      `json:"attempts_left"`
-	HintAvailable  bool     `json:"hint_available"`
-	SolutionViewed bool     `json:"solution_viewed"`
-	Solved         bool     `json:"solved"`
-	CurrentStreak  int      `json:"current_streak"`
-	PlayerRating   int      `json:"player_rating"`
-	AttemptedMoves []string `json:"attempted_moves"`
+	PuzzleID         string   `json:"puzzle_id"`
+	FEN              string   `json:"fen"`
+	InitialMove      string   `json:"initial_move"`
+	Rating           int      `json:"rating"`
+	Themes           []string `json:"themes"`
+	AttemptsLeft     int      `json:"attempts_left"`
+	HintAvailable    bool     `json:"hint_available"`
+	SolutionViewed   bool     `json:"solution_viewed"`
+	Solved           bool     `json:"solved"`
+	CurrentStreak    int      `json:"current_streak"`
+	PlayerRating     int      `json:"player_rating"`
+	AttemptedMoves   []string `json:"attempted_moves"`
+	TotalMoves       int      `json:"total_moves"`
+	PlayerMovesCount int      `json:"player_moves_count"`
 }
 
 type SubmitAttemptRequest struct {
@@ -128,6 +130,9 @@ type PuzzleStatsResponse struct {
 type PuzzleHistoryItem struct {
 	ID               int64     `json:"id"`
 	PuzzleID         string    `json:"puzzle_id"`
+	FEN              string    `json:"fen,omitempty"`
+	InitialMove      string    `json:"initial_move,omitempty"`
+	Themes           []string  `json:"themes,omitempty"`
 	Solved           bool      `json:"solved"`
 	AttemptedMoves   []string  `json:"attempted_moves"`
 	SolutionMoves    []string  `json:"solution_moves"`
@@ -136,6 +141,15 @@ type PuzzleHistoryItem struct {
 	RatingChange     int       `json:"rating_change"`
 	TimeTakenMs      int       `json:"time_taken_ms"`
 	CreatedAt        time.Time `json:"created_at"`
+}
+
+type PuzzleDetailsResponse struct {
+	PuzzleID      string   `json:"puzzle_id"`
+	FEN           string   `json:"fen"`
+	InitialMove   string   `json:"initial_move"`
+	Rating        int      `json:"rating"`
+	Themes        []string `json:"themes"`
+	SolutionMoves []string `json:"solution_moves"`
 }
 
 type PuzzleHistoryResponse struct {
@@ -184,11 +198,13 @@ type StartRushRequest struct {
 }
 
 type RushPuzzleData struct {
-	PuzzleID    string   `json:"puzzle_id"`
-	FEN         string   `json:"fen"`
-	InitialMove string   `json:"initial_move"`
-	Rating      int      `json:"rating"`
-	Themes      []string `json:"themes"`
+	PuzzleID         string   `json:"puzzle_id"`
+	FEN              string   `json:"fen"`
+	InitialMove      string   `json:"initial_move"`
+	Rating           int      `json:"rating"`
+	Themes           []string `json:"themes"`
+	TotalMoves       int      `json:"total_moves"`
+	PlayerMovesCount int      `json:"player_moves_count"`
 }
 
 type StartRushResponse struct {
@@ -225,6 +241,7 @@ type SubmitRushMoveResponse struct {
 	StrikesLeft int             `json:"strikes_left"`
 	GameOver    bool            `json:"game_over"`
 	Reason      string          `json:"reason,omitempty"`
+	NextMove    string          `json:"next_move,omitempty"`
 	NextPuzzle  *RushPuzzleData `json:"next_puzzle,omitempty"`
 	Summary     *RushSummary    `json:"summary,omitempty"`
 }
@@ -292,11 +309,23 @@ type CustomPuzzleFilter struct {
 }
 
 type CustomPuzzleResponse struct {
-	PuzzleID    string   `json:"puzzle_id"`
-	FEN         string   `json:"fen"`
-	InitialMove string   `json:"initial_move"`
-	Rating      int      `json:"rating"`
-	Themes      []string `json:"themes"`
+	PuzzleID         string   `json:"puzzle_id"`
+	FEN              string   `json:"fen"`
+	InitialMove      string   `json:"initial_move"`
+	Rating           int      `json:"rating"`
+	Themes           []string `json:"themes"`
+	TotalMoves       int      `json:"total_moves"`
+	PlayerMovesCount int      `json:"player_moves_count"`
+}
+
+type NextPuzzleResponse struct {
+	PuzzleID         string   `json:"puzzle_id"`
+	FEN              string   `json:"fen"`
+	InitialMove      string   `json:"initial_move"`
+	Rating           int      `json:"rating"`
+	Themes           []string `json:"themes"`
+	TotalMoves       int      `json:"total_moves"`
+	PlayerMovesCount int      `json:"player_moves_count"`
 }
 
 type SubmitCustomAttemptRequest struct {
