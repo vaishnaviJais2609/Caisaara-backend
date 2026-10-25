@@ -618,6 +618,25 @@ func (s *Service) MakeMove(
 	)
 	gameMove.CreatedAt = now
 
+	err = s.Repository.SaveMoveTx(
+		ctx,
+		gameID,
+		position,
+		status,
+		result,
+		endReason,
+		nextTurn,
+		newWhiteTimeMs,
+		newBlackTimeMs,
+		&now,
+		gameMove,
+		expectedTurn,
+	)
+	if err != nil {
+		slog.ErrorContext(ctx, "save move transaction failed in make move", "game_id", gameID, "error", err)
+		return nil, err
+	}
+
 	currentGame.Position = position
 	currentGame.Status = status
 	currentGame.Result = result
@@ -628,23 +647,10 @@ func (s *Service) MakeMove(
 	currentGame.TurnStartedAt = &now
 	currentGame.LastMove = move
 
-	s.addPendingMove(gameID)
-	s.enqueueMovePersist(movePersistTask{
-		GameID:        gameID,
-		Position:      position,
-		Status:        status,
-		Result:        result,
-		EndReason:     endReason,
-		NextTurn:      nextTurn,
-		WhiteTimeMs:   newWhiteTimeMs,
-		BlackTimeMs:   newBlackTimeMs,
-		TurnStartedAt: &now,
-		Move:          gameMove,
-		WhitePlayerID: currentGame.WhitePlayerID,
-		BlackPlayerID: currentGame.BlackPlayerID,
-		Game:          currentGame,
-		ExpectedTurn:  expectedTurn,
-	})
+	if status == StatusFinished {
+		s.notifyGameCompleted(ctx, currentGame)
+		s.notifyGameStateUpdated(ctx, currentGame)
+	}
 
 	slog.InfoContext(ctx, "move completed successfully", "game_id", gameID, "player_id", playerID, "move", move, "status", status)
 
