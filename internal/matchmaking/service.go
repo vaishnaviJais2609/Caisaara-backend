@@ -49,16 +49,25 @@ type TiltChecker interface {
 	Check(ctx context.Context, playerID int64) (*tilt.Status, error)
 }
 
+type BattleRatingFinder interface {
+	GetBattleRating(ctx context.Context, userID int64) (int, error)
+}
+
 type MatchmakingService interface {
 	Join(ctx context.Context, userID int64, timeControlMinutes int, incrementSeconds int, rated bool, ignoreTilt bool) (*tilt.Status, error)
 	Cancel(ctx context.Context, userID int64) error
 	GetStatus(ctx context.Context, userID int64) (*Status, error)
+	JoinBattle(ctx context.Context, userID int64) error
+	CancelBattle(ctx context.Context, userID int64) error
+	GetBattleStatus(ctx context.Context, userID int64) (*Status, error)
+	SetBattleRatingFinder(finder BattleRatingFinder)
 }
 
 type Service struct {
 	QueueRepo    QueueRepository
 	RatingFinder RatingFinder
-	TiltChecker  TiltChecker
+	TiltChecker        TiltChecker
+	BattleRatingFinder BattleRatingFinder
 }
 
 func NewService(queueRepo QueueRepository, ratingFinder RatingFinder, tiltChecker TiltChecker) *Service {
@@ -185,4 +194,49 @@ func (s *Service) GetStatus(ctx context.Context, userID int64) (*Status, error) 
 	}
 
 	return &Status{State: StatusIdle}, nil
+}
+
+
+func (s *Service) SetBattleRatingFinder(finder BattleRatingFinder) {
+	s.BattleRatingFinder = finder
+}
+
+func (s *Service) JoinBattle(ctx context.Context, userID int64) error {
+	rating := 1200
+	if s.BattleRatingFinder != nil {
+		if r, err := s.BattleRatingFinder.GetBattleRating(ctx, userID); err == nil && r > 0 {
+			rating = r
+		}
+	}
+	return s.QueueRepo.AddToBattleQueue(ctx, userID, rating, queueTTL)
+}
+
+func (s *Service) CancelBattle(ctx context.Context, userID int64) error {
+	_, err := s.QueueRepo.RemoveFromBattleQueue(ctx, userID)
+	return err
+}
+
+func (s *Service) GetBattleStatus(ctx context.Context, userID int64) (*Status, error) {
+	matchID, err := s.QueueRepo.GetMatch(ctx, userID)
+	if err == nil && matchID != "" {
+		return &Status{
+			State:  StatusMatched,
+			GameID: matchID,
+		}, nil
+	}
+
+	queue, err := s.QueueRepo.GetBattleQueue(ctx)
+	if err == nil {
+		for _, entry := range queue {
+			if entry.UserID == userID {
+				return &Status{
+					State: StatusSearching,
+				}, nil
+			}
+		}
+	}
+
+	return &Status{
+		State: StatusIdle,
+	}, nil
 }

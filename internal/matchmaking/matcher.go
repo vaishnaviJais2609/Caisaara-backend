@@ -20,6 +20,15 @@ const (
 type Matcher struct {
 	QueueRepo      QueueRepository
 	GameRepository game.GameRepository
+	BattleCreator  BattleCreator
+}
+
+type BattleCreator interface {
+	CreateMatchedBattle(ctx context.Context, player1ID, player2ID int64) (string, error)
+}
+
+func (m *Matcher) SetBattleCreator(creator BattleCreator) {
+	m.BattleCreator = creator
 }
 
 func NewMatcher(queueRepo QueueRepository, gameRepository game.GameRepository) *Matcher {
@@ -45,6 +54,9 @@ func (m *Matcher) Start(ctx context.Context) {
 }
 
 func (m *Matcher) runOnce(ctx context.Context) {
+	if m.BattleCreator != nil {
+		m.matchBattleQueue(ctx)
+	}
 	for _, tc := range AllowedTimeControls {
 		for _, rated := range []bool{false, true} {
 			m.matchQueue(ctx, tc.Minutes, tc.Increment, rated)
@@ -153,4 +165,53 @@ func randomColors(playerA int64, playerB int64) (int64, int64, error) {
 		return playerA, playerB, nil
 	}
 	return playerB, playerA, nil
+}
+
+
+func (m *Matcher) matchBattleQueue(ctx context.Context) {
+	entries, err := m.QueueRepo.GetBattleQueue(ctx)
+	if err != nil || len(entries) < 2 {
+		return
+	}
+
+	now := time.Now()
+	i := 0
+	for i+1 < len(entries) {
+		a := entries[i]
+		b := entries[i+1]
+
+		if canMatch(a, b, now) {
+			m.pairBattle(ctx, a, b)
+			i += 2
+		} else {
+			i++
+		}
+	}
+}
+
+func (m *Matcher) pairBattle(ctx context.Context, a *QueueEntry, b *QueueEntry) {
+	entryA, err := m.QueueRepo.RemoveFromBattleQueue(ctx, a.UserID)
+	if err != nil {
+		return
+	}
+
+	entryB, err := m.QueueRepo.RemoveFromBattleQueue(ctx, b.UserID)
+	if err != nil {
+		_ = m.QueueRepo.AddToBattleQueue(ctx, entryA.UserID, entryA.Rating, queueTTL)
+		return
+	}
+
+	battleID, err := m.BattleCreator.CreateMatchedBattle(ctx, entryA.UserID, entryB.UserID)
+	if err != nil {
+		slog.ErrorContext(ctx, "create battle from matchmaking failed", "error", err)
+		_ = m.QueueRepo.AddToBattleQueue(ctx, entryA.UserID, entryA.Rating, queueTTL)
+		_ = m.QueueRepo.AddToBattleQueue(ctx, entryB.UserID, entryB.Rating, queueTTL)
+		return
+	}
+
+	for _, userID := range []int64{entryA.UserID, entryB.UserID} {
+		if err := m.QueueRepo.SaveMatch(ctx, userID, battleID, matchTTL); err != nil {
+			slog.ErrorContext(ctx, "save battle match failed", "error", err, "user_id", userID)
+		}
+	}
 }
