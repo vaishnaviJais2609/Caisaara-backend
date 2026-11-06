@@ -2,9 +2,10 @@ package bot
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
+	"math/big"
 	"slices"
 	"time"
 
@@ -66,7 +67,10 @@ func (s *Service) CreateGame(
 		return nil, err
 	}
 	if activeGames >= MaxActiveGames {
-		return nil, ErrTooManyActiveGames
+		toResign := activeGames - MaxActiveGames + 1
+		if err := s.Repository.ResignOldestActiveGames(ctx, playerID, toResign); err != nil {
+			return nil, err
+		}
 	}
 
 	game := &Game{
@@ -185,7 +189,7 @@ func (s *Service) PlayBotMove(
 	}
 
 	move := ""
-	if rand.IntN(100) < MistakeChance(game.BotRating) { //nolint:gosec // bot mistakes do not need secure randomness
+	if randomN(100) < MistakeChance(game.BotRating) {
 		move = randomMove(board)
 	}
 
@@ -319,7 +323,7 @@ func randomMove(board *chess.Game) string {
 		return ""
 	}
 
-	move := moves[rand.IntN(len(moves))] //nolint:gosec
+	move := moves[randomN(len(moves))]
 	return chess.UCINotation{}.Encode(nil, &move)
 }
 
@@ -337,13 +341,24 @@ func resolveColor(color string) (string, error) {
 	case ColorBlack:
 		return ColorBlack, nil
 	case ColorRandom:
-		if rand.IntN(2) == 0 { //nolint:gosec
+		if randomN(2) == 0 {
 			return ColorWhite, nil
 		}
 		return ColorBlack, nil
 	default:
 		return "", ErrInvalidColor
 	}
+}
+
+func randomN(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	val, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
+	if err != nil {
+		return 0
+	}
+	return int(val.Int64())
 }
 
 func finishIfOver(game *Game, board *chess.Game) {

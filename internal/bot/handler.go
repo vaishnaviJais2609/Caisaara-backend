@@ -179,3 +179,38 @@ func (h *Handler) ListBots(c *gin.Context) {
 		"bots": bots,
 	})
 }
+
+func (h *Handler) ResignGame(c *gin.Context) {
+	userID, ok := middleware.GetUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "user not authenticated",
+		})
+		return
+	}
+
+	gameID := c.Param("gameID")
+	ctx := c.Request.Context()
+
+	game, err := h.Service.Resign(ctx, gameID, userID)
+	if errors.Is(err, ErrGameNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	if errors.Is(err, ErrGameFinished) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "internal server error",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, game)
+}
