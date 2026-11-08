@@ -23,7 +23,7 @@ type TournamentWithPlayerCount struct {
 type TournamentRepository interface {
 	CreateTournament(ctx context.Context, tournament *Tournament) error
 	FindByID(ctx context.Context, id int64) (*Tournament, error)
-	ListPublicTournaments(ctx context.Context) ([]*TournamentWithPlayerCount, error)
+	ListPublicTournaments(ctx context.Context, limit int, offset int) ([]*TournamentWithPlayerCount, error)
 	FindByIDWithPlayerCount(ctx context.Context, id int64) (*TournamentWithPlayerCount, error)
 	FindByInviteCode(ctx context.Context, code string) (*TournamentWithPlayerCount, error)
 	UpdateInviteCode(ctx context.Context, tournamentID int64, newCode string, expiresAt time.Time) error
@@ -203,7 +203,7 @@ func (r *Repository) FindByID(ctx context.Context, id int64) (*Tournament, error
 	return &t, nil
 }
 
-func (r *Repository) ListPublicTournaments(ctx context.Context) ([]*TournamentWithPlayerCount, error) {
+func (r *Repository) ListPublicTournaments(ctx context.Context, limit int, offset int) ([]*TournamentWithPlayerCount, error) {
 	rows, err := r.DB.Query(
 		ctx,
 		`SELECT
@@ -230,7 +230,10 @@ func (r *Repository) ListPublicTournaments(ctx context.Context) ([]*TournamentWi
 		LEFT JOIN tournament_players tp ON t.id = tp.tournament_id
 		WHERE t.visibility = 'public'
 		GROUP BY t.id
-		ORDER BY t.created_at DESC`,
+		ORDER BY t.created_at DESC
+		LIMIT $1 OFFSET $2`,
+		limit,
+		offset,
 	)
 	if err != nil {
 		slog.ErrorContext(ctx, "list public tournaments repository failed", "error", err)

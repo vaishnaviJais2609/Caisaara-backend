@@ -69,9 +69,18 @@ func (h *Handler) CreateTournament(c *gin.Context) {
 
 func (h *Handler) ListPublicTournaments(c *gin.Context) {
 	ctx := c.Request.Context()
-	list, err := h.Service.ListPublicTournaments(ctx)
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	if page, err := strconv.Atoi(c.Query("page")); err == nil && page > 1 && offset == 0 {
+		if limit <= 0 {
+			limit = 20
+		}
+		offset = (page - 1) * limit
+	}
+
+	list, err := h.Service.ListPublicTournaments(ctx, limit, offset)
 	if err != nil {
-		slog.ErrorContext(ctx, "list public tournaments handler failed", "error", err)
+		slog.ErrorContext(ctx, "list public tournaments handler failed", "limit", limit, "offset", offset, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "internal server error",
 		})

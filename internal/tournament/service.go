@@ -22,7 +22,7 @@ type Broadcaster interface {
 
 type Service interface {
 	CreateTournament(ctx context.Context, userID int64, req CreateTournamentRequest) (*Tournament, error)
-	ListPublicTournaments(ctx context.Context) ([]*TournamentWithPlayerCount, error)
+	ListPublicTournaments(ctx context.Context, limit int, offset int) ([]*TournamentWithPlayerCount, error)
 	FindByID(ctx context.Context, id int64) (*Tournament, error)
 	GetTournamentDetails(ctx context.Context, id int64) (*TournamentWithPlayerCount, error)
 	GetTournamentByInviteCode(ctx context.Context, code string) (*TournamentWithPlayerCount, error)
@@ -84,7 +84,11 @@ func (s *TournamentService) SetBroadcaster(b Broadcaster) {
 	s.Broadcaster = b
 }
 
-const inviteCodeChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+const (
+	defaultTournamentLimit = 20
+	maxTournamentLimit     = 100
+	inviteCodeChars        = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+)
 
 func generateInviteCode() string {
 	b := make([]byte, 6)
@@ -183,8 +187,17 @@ func (s *TournamentService) CreateTournament(ctx context.Context, userID int64, 
 	return tournament, nil
 }
 
-func (s *TournamentService) ListPublicTournaments(ctx context.Context) ([]*TournamentWithPlayerCount, error) {
-	return s.Repo.ListPublicTournaments(ctx)
+func (s *TournamentService) ListPublicTournaments(ctx context.Context, limit int, offset int) ([]*TournamentWithPlayerCount, error) {
+	if limit <= 0 {
+		limit = defaultTournamentLimit
+	}
+	if limit > maxTournamentLimit {
+		limit = maxTournamentLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return s.Repo.ListPublicTournaments(ctx, limit, offset)
 }
 
 func (s *TournamentService) FindByID(ctx context.Context, id int64) (*Tournament, error) {
