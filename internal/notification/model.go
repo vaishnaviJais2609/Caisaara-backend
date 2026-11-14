@@ -21,6 +21,7 @@ const (
 	TypeClubNewOwner        = "club_new_owner"
 	TypeClubKicked          = "club_kicked"
 	TypeClubBanned          = "club_banned"
+	TypeFollow              = "user_follow"
 )
 
 type Notification struct {
@@ -52,6 +53,7 @@ var AllTypes = []string{
 	TypeClubNewOwner,
 	TypeClubKicked,
 	TypeClubBanned,
+	TypeFollow,
 }
 
 type Preference struct {

@@ -141,3 +141,27 @@ func (r *FollowRepository) GetFollowing(ctx context.Context, userID int64, limit
 	}
 	return users, rows.Err()
 }
+
+func (r *FollowRepository) UserExists(ctx context.Context, userID int64) (bool, error) {
+	var exists bool
+	err := r.DB.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&exists)
+	return exists, err
+}
+
+func (r *FollowRepository) IsBlocked(ctx context.Context, userID, otherID int64) (bool, error) {
+	var blocked bool
+	err := r.DB.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM user_blocks
+			WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)
+		)`,
+		userID, otherID,
+	).Scan(&blocked)
+	return blocked, err
+}
+
+func (r *FollowRepository) FindUsernameByID(ctx context.Context, userID int64) (string, error) {
+	var username string
+	err := r.DB.QueryRow(ctx, `SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
+	return username, err
+}

@@ -12,4 +12,7 @@ var (
 	ErrGameNotFound    = errors.New("game not found")
 	ErrGameNotFinished = errors.New("only finished games can be shared")
 	ErrInvalidFEN      = errors.New("invalid fen")
+	ErrSelfFollow      = errors.New("you cannot follow yourself")
+	ErrUserNotFound    = errors.New("user not found")
+	ErrUserBlocked     = errors.New("you cannot follow this user")
 )
