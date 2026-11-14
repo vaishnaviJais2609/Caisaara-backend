@@ -137,9 +137,11 @@ func toCommentResponse(c *model.Comment) dto.CommentResponse {
 	return dto.CommentResponse{
 		ID: c.ID,
 		Author: dto.AuthorResponse{
+			ID:          c.UserID,
 			Username:    c.Author.Username,
 			DisplayName: c.Author.DisplayName,
 			AvatarURL:   c.Author.AvatarURL,
+			IsFollowing: c.Author.IsFollowing,
 		},
 		Body:      c.Body,
 		CreatedAt: c.CreatedAt,

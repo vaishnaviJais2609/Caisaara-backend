@@ -3,10 +3,14 @@ package model
 import "time"
 
 type Author struct {
+	ID          int64
 	Username    string
 	DisplayName *string
 	AvatarURL   *string
+	IsFollowing bool
 }
+
+type UserSummary = Author
 
 type Post struct {
 	ID           int64

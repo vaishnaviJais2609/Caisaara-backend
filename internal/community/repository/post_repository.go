@@ -42,7 +42,8 @@ const postColumns = `
 	pr.avatar_url,
 	(SELECT COUNT(*) FROM post_comments c WHERE c.post_id = p.id),
 	(SELECT r.reaction FROM post_reactions r WHERE r.post_id = p.id AND r.user_id = $1),
-	EXISTS (SELECT 1 FROM post_bookmarks b WHERE b.post_id = p.id AND b.user_id = $1)
+	EXISTS (SELECT 1 FROM post_bookmarks b WHERE b.post_id = p.id AND b.user_id = $1),
+	EXISTS (SELECT 1 FROM user_follows f WHERE f.follower_id = $1 AND f.following_id = p.user_id)
 FROM posts p
 JOIN users u ON u.id = p.user_id
 LEFT JOIN player_profiles pr ON pr.user_id = p.user_id`
@@ -75,10 +76,13 @@ func scanPost(row pgx.Row) (*model.Post, error) {
 		&p.CommentCount,
 		&p.MyReaction,
 		&p.IsBookmarked,
+		&p.Author.IsFollowing,
 	)
 	if err != nil {
 		return nil, err
 	}
+
+	p.Author.ID = p.UserID
 
 	if gameID != nil {
 		game.ID = *gameID

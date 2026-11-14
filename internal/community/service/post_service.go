@@ -305,9 +305,11 @@ func toPostResponse(p *model.Post) dto.PostResponse {
 	return dto.PostResponse{
 		ID: p.ID,
 		Author: dto.AuthorResponse{
+			ID:          p.Author.ID,
 			Username:    p.Author.Username,
 			DisplayName: p.Author.DisplayName,
 			AvatarURL:   p.Author.AvatarURL,
+			IsFollowing: p.Author.IsFollowing,
 		},
 		Kind:         p.Kind,
 		Body:         p.Body,

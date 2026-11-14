@@ -18,9 +18,11 @@ type SetReactionData struct {
 }
 
 type AuthorResponse struct {
+	ID          int64   `json:"id"`
 	Username    string  `json:"username"`
 	DisplayName *string `json:"display_name"`
 	AvatarURL   *string `json:"avatar_url"`
+	IsFollowing bool    `json:"is_following"`
 }
 
 type PostResponse struct {
