@@ -254,9 +254,9 @@ func writeError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, service.ErrInternal):
 		response.Error(c, http.StatusInternalServerError, "internal server error")
-	case errors.Is(err, service.ErrPostNotFound), errors.Is(err, service.ErrCommentNotFound), errors.Is(err, service.ErrGameNotFound):
+	case errors.Is(err, service.ErrPostNotFound), errors.Is(err, service.ErrCommentNotFound), errors.Is(err, service.ErrGameNotFound), errors.Is(err, service.ErrUserNotFound):
 		response.Error(c, http.StatusNotFound, err.Error())
-	case errors.Is(err, service.ErrNotAllowed):
+	case errors.Is(err, service.ErrNotAllowed), errors.Is(err, service.ErrUserBlocked):
 		response.Error(c, http.StatusForbidden, err.Error())
 	default:
 		response.Error(c, http.StatusBadRequest, err.Error())
